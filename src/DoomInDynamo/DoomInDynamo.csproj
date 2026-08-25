@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AssemblyName>DoomInDynamo</AssemblyName>
+    <RootNamespace>DoomInDynamo</RootNamespace>
+    <UseWPF>true</UseWPF>
+    <!-- Only for IWin32Window in OnBrowseClick, so the file picker gets a real owner
+         HWND - see the comment there for why that matters when hosted inside Revit. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\vendor\ManagedDoom.Engine\ManagedDoom.Engine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Dynamo SDK assemblies, referenced directly from the local Dynamo-for-Revit
+         install (see Directory.Build.props for $(DynamoForRevitDir)). There is no
+         public NuGet package for this SDK today; if Autodesk publishes one for
+         Revit 2027 / Dynamo 4.x later, replace this ItemGroup with a
+         PackageReference and drop the HintPaths. -->
+    <Reference Include="DynamoCore">
+      <HintPath>$(DynamoForRevitDir)\DynamoCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="DynamoCoreWpf">
+      <HintPath>$(DynamoForRevitDir)\DynamoCoreWpf.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ProtoCore">
+      <HintPath>$(DynamoForRevitDir)\ProtoCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="DynamoServices">
+      <HintPath>$(DynamoForRevitDir)\DynamoServices.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(DynamoForRevitDir)\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

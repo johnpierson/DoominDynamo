@@ -1,0 +1,45 @@
+<UserControl x:Class="DoomInDynamo.UI.DoomPlayerView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent"
+             MinWidth="220" MinHeight="180">
+    <!--
+        A Grid (not a StackPanel) with a star-sized row for the screen, and no fixed
+        Width/Height anywhere in this file, so the whole thing actually grows/shrinks
+        when the user drags the node's resize handle (see DoomPlayerNodeModel.IsResizable).
+    -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+            <Button x:Name="BrowseButton" Content="Browse WAD..." Padding="6,2" Margin="0,0,4,0" />
+            <Button x:Name="StartStopButton" Content="Start" Padding="10,2" Margin="0,0,4,0" IsEnabled="False" />
+            <TextBlock x:Name="StatusText" Text="Idle" VerticalAlignment="Center" Foreground="#CCCCCC" />
+        </StackPanel>
+
+        <TextBlock x:Name="WadPathText" Grid.Row="1" Text="(no WAD selected)"
+                   FontSize="10" Foreground="#999999" TextTrimming="CharacterEllipsis"
+                   Margin="0,0,0,4" />
+
+        <Border Grid.Row="2" BorderBrush="#444444" BorderThickness="1" Background="Black">
+            <Image x:Name="ScreenImage" Stretch="Fill"
+                   HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                   Focusable="True"
+                   RenderOptions.BitmapScalingMode="NearestNeighbor"
+                   SnapsToDevicePixels="True" />
+        </Border>
+
+        <TextBlock x:Name="DebugText" Grid.Row="3" Text=""
+                   FontSize="10" Foreground="#66AAFF" Margin="0,4,0,0" />
+
+        <TextBlock Grid.Row="4"
+                   Text="Click the screen for keyboard focus, then Esc/Enter/Space opens the menu. Alt fires, Space uses. Mouse steers left/right once a level starts - cursor hides and locks automatically, Esc lets go."
+                   FontSize="10" Foreground="#888888" TextWrapping="Wrap" Margin="0,2,0,0" />
+    </Grid>
+</UserControl>

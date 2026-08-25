@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AssemblyName>ManagedDoom.Engine</AssemblyName>
+    <RootNamespace>ManagedDoom</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- This project compiles only the platform-independent subset of
+         https://github.com/sinshu/managed-doom (see ../ManagedDoom/VENDOR_NOTICE.md).
+         GPLv2, same as the original: see ../ManagedDoom/LICENSE_ManagedDoom.txt. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\ManagedDoom\src\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Only for src/Silk/SilkSound.cs + SilkMusic.cs (audio) - these two files don't
+         depend on Silk.NET/GLFW/OpenGL/TrippyGL like the rest of the Silk/ folder does,
+         just DrippyAL (OpenAL wrapper) and MeltySynth (software MIDI synth for music).
+         Same versions upstream ManagedDoom itself uses. -->
+    <PackageReference Include="DrippyAL" Version="2.1.3" />
+    <PackageReference Include="MeltySynth" Version="2.4.1" />
+  </ItemGroup>
+
+</Project>

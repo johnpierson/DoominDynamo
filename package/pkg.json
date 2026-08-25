@@ -1,0 +1,28 @@
+{
+  "license": "GPL-2.0-only",
+  "file_hash": null,
+  "name": "DoomInDynamo",
+  "version": "1.0.0",
+  "description": "Plays Doom inside a Dynamo node, using the ManagedDoom engine rendered onto the node's face. You supply your own WAD file - none is bundled. See https://github.com/ (update with your repo URL) for setup and licensing notes.",
+  "group": "",
+  "keywords": [
+    "doom",
+    "game",
+    "fun",
+    "will-it-run-doom"
+  ],
+  "dependencies": [],
+  "host_dependencies": [],
+  "contents": "Doom Player node (DoomInDynamo category)",
+  "engine_version": "4.1.1.5050",
+  "engine": "dynamo",
+  "engine_metadata": "",
+  "site_url": "",
+  "repository_url": "",
+  "contains_binaries": true,
+  "node_libraries": [
+    "DoomInDynamo, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null"
+  ],
+  "copyright_holder": "",
+  "copyright_year": ""
+}

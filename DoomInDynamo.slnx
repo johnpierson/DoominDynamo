@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DoomInDynamo/DoomInDynamo.csproj" />
+  </Folder>
+  <Folder Name="/vendor/">
+    <Project Path="vendor/ManagedDoom.Engine/ManagedDoom.Engine.csproj" />
+  </Folder>
+</Solution>
