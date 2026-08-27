@@ -16,6 +16,37 @@ namespace DoomInDynamo.WadGen
     {
         public static void Write(DoomMap map, string path)
         {
+            // Linedef and sidedef indices are signed int16 in seg and linedef
+            // records; the other counts are guarded where they grow (BspBuilder,
+            // BlockmapBuilder), but sidedefs can outrun them on two-sided-heavy
+            // maps (2 per door/low-wall/stair line), so check here at the choke
+            // point before anything gets written.
+            if (map.Linedefs.Count > short.MaxValue)
+            {
+                throw new InvalidOperationException("Too many linedefs for the Doom map format (" + map.Linedefs.Count + ").");
+            }
+            if (map.Sidedefs.Count > short.MaxValue)
+            {
+                throw new InvalidOperationException("Too many sidedefs for the Doom map format (" + map.Sidedefs.Count + ").");
+            }
+            if (map.Sectors.Count > short.MaxValue)
+            {
+                throw new InvalidOperationException("Too many sectors for the Doom map format (" + map.Sectors.Count + ").");
+            }
+
+            // MapBuilder budgets every geometry source into int16 coordinates; a
+            // vertex outside the range means some future source bypassed that, and
+            // wrapping it here would write a silently corrupt map.
+            foreach (var v in map.Vertices)
+            {
+                if (v.X < short.MinValue || v.X > short.MaxValue ||
+                    v.Y < short.MinValue || v.Y > short.MaxValue)
+                {
+                    throw new InvalidOperationException(
+                        "Vertex (" + v.X + ", " + v.Y + ") is outside Doom's 16-bit coordinate range - geometry escaped the map budget.");
+                }
+            }
+
             var lumps = new List<KeyValuePair<string, byte[]>>();
             foreach (var slot in new[] { "MAP01", "E1M1" })
             {

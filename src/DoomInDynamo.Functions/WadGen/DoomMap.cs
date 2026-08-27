@@ -117,6 +117,7 @@ namespace DoomInDynamo.WadGen
         public const int LineFlagBlocking = 0x0001;
         public const int LineFlagTwoSided = 0x0004;
         public const int LineFlagUpperUnpegged = 0x0008;
+        public const int LineFlagLowerUnpegged = 0x0010;
 
         public const int ThingAllSkills = 0x0007;
 

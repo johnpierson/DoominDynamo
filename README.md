@@ -83,9 +83,23 @@ run it reads the active Revit document and writes a PWAD:
   Space on either side, waits, and closes again. Monsters can open them too,
   exactly like the originals. Rooms connect where the architect said they
   should - but you still have to open the door.
+- **Real heights.** The room ceiling comes from the length-weighted *median*
+  wall height (one tall atrium wall doesn't raise the whole roof), and walls
+  meaningfully shorter than it become **low walls** at their true geometric
+  height - you see and shoot over them, and step over anything curb-height.
+- **Stairs and furnishings.** Stair flights become sequences of climbable
+  steps (risers clamped under Doom's 24-unit step limit); furniture and
+  casework become blocks you can see over; columns become solid pillars.
+  All approximated from bounding boxes - a rotated sofa gets a slightly
+  generous footprint, and spiral stairs are skipped (no run direction to
+  infer from a square box).
+- **A findable exit.** A switch-faced pedestal stands just outside the
+  building's north-east corner - press Space on any side of it to finish the
+  level (the automap, `Tab`, makes it easy to spot).
 - **Which level?** By default the Revit level with the most walls; pass
   `levelName` to pick another. One level per WAD - Doom's engine is 2.5D and has
-  no room-over-room, so multi-storey exports are one-floor-at-a-time by design.
+  no room-over-room, so multi-storey exports are one-floor-at-a-time by design
+  (a multi-storey stair exports just its first climbable rise).
 - **Random items.** `seed`-driven placement of health, armor, ammo, weapons,
   barrels - and monsters unless `includeMonsters` is false (all of it is
   rejection-sampled to stay out of walls; every thing type used exists even in

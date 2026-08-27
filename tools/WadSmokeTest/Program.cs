@@ -94,10 +94,21 @@ namespace WadSmokeTest
             // Angled wall.
             AddWall(model, 26, 5, 36, 11, t, h);
 
+            // A 3 ft parapet in the west room - low enough to become a see-over
+            // low wall instead of a solid one.
+            AddWall(model, 5, 20, 13, 20, t, 3.0);
+
             // Working doors standing in both gaps (what RevitExtractor emits per
             // merged door cut).
             model.Doors.Add(new DoorOpening { CX = 10, CY = 0, DirX = 1, DirY = 0, WidthFt = 3.5, ThicknessFt = t });
             model.Doors.Add(new DoorOpening { CX = 22, CY = 14, DirX = 0, DirY = 1, WidthFt = 4.0, ThicknessFt = t });
+
+            // Furnishings: a desk (raised block) and a full-height column (solid).
+            model.Prisms.Add(new Prism { CX = 30, CY = 19, DirX = 1, DirY = 0, HalfLenFt = 2.5, HalfWidthFt = 1.25, HeightFt = 2.5 });
+            model.Prisms.Add(new Prism { CX = 25, CY = 3, DirX = 1, DirY = 0, HalfLenFt = 0.5, HalfWidthFt = 0.5, HeightFt = 9.0 });
+
+            // A 12 ft stair flight rising 6 ft along the east room's north side.
+            model.Stairs.Add(new StairFlight { X1 = 25, Y1 = 25, X2 = 37, Y2 = 25, WidthFt = 4.0, RiseFt = 6.0 });
 
             model.Rooms.Add(new RoomPoint { X = 10, Y = 15 });
             model.Rooms.Add(new RoomPoint { X = 30, Y = 22 });
@@ -247,9 +258,10 @@ namespace WadSmokeTest
 
         private static void ValidateSlot(ParsedMap map, string slot, List<Tuple<string, byte[]>> lumps, int slotStart)
         {
-            // One big sector plus one per working door (both synthetic doors are
-            // wide enough to build).
-            Check(map.SectorCount == 3, slot + ": one main sector + two door sectors");
+            // One big sector + 2 doors + 1 low wall + 1 desk + 11 stair steps (the
+            // 12 ft flight loses 8 units to the end insets -> 11 treads; the column
+            // is full-height solid, so no sector of its own).
+            Check(map.SectorCount == 16, slot + ": expected sector inventory (got " + map.SectorCount + ")");
             Check(map.Vertices.Length > 0 && map.Linedefs.Length >= 8, slot + ": has geometry");
             Check(map.Segs.Length > 0 && map.Subsectors.Length > 0 && map.Nodes.Length > 0, slot + ": has BSP");
 
@@ -290,7 +302,7 @@ namespace WadSmokeTest
                 }
             }
             Check(drFaces == 4, slot + ": four DR door faces (two per door)");
-            Check(exits == 1, slot + ": exactly one exit switch");
+            Check(exits == 4, slot + ": exit pedestal has four usable faces");
             Check(ok, slot + ": door faces are two-sided with a back sector");
 
             ok = true;
@@ -594,6 +606,22 @@ namespace WadSmokeTest
                 Check(player.PlayerState == PlayerState.Dead || movedSq > 16 * 16,
                     "player actually moved (or died trying: " + player.PlayerState + ")");
 
+                // Raised-floor geometry through the engine's own point queries: the
+                // synthetic model puts a 3 ft low wall at (9, 20)ft -> floor 48, a
+                // 2.5 ft desk at (30, 19)ft -> floor 40, and a stair from (25,25)
+                // to (37,25)ft that after the 4-unit end insets becomes 11 treads
+                // rising 8 units each. Model center is (20, 15)ft, scale 16 -> map
+                // coords below.
+                var okHeights = true;
+                okHeights &= FloorAt(world, -176, 80) == 48;   // low wall top
+                okHeights &= FloorAt(world, 160, 64) == 40;    // desk top
+                for (var step = 1; step <= 11; step++)
+                {
+                    var sx = 84 + 184.0 * (step - 0.5) / 11;   // center of step's tread
+                    okHeights &= FloorAt(world, sx, 160) == 8 * step;
+                }
+                Check(okHeights, "low wall, desk and all 11 stair treads have the expected floor heights");
+
                 // Cross-check PointInSubsector against the same random points the
                 // structural walk used - it must resolve without throwing to a real
                 // sector every time (points inside a doorway legitimately land in
@@ -611,6 +639,12 @@ namespace WadSmokeTest
             }
         }
 
+        private static int FloorAt(World world, double x, double y)
+        {
+            var subsector = Geometry.PointInSubsector(Fixed.FromDouble(x), Fixed.FromDouble(y), world.Map);
+            return subsector.Sector.FloorHeight.Data >> 16;
+        }
+
         /// <summary>
         /// The minimal resource WAD GameContent.CreateDummy needs: PLAYPAL and
         /// COLORMAP (raw bytes), a TEXTURE1 with every wall texture name the
@@ -625,7 +659,7 @@ namespace WadSmokeTest
             lumps.Add(Tuple.Create("COLORMAP", new byte[34 * 256]));
             lumps.Add(Tuple.Create("TEXTURE1", BuildTexture1(
                 "STARTAN3", "STONE2", "BROWN1", "SLADWALL", "BROWNGRN",
-                "BIGDOOR2", "DOORTRAK",
+                "BIGDOOR2", "DOORTRAK", "SW1COMP", "SW2COMP", "SUPPORT2", "STEP2",
                 "SKY1", "SKY2", "SKY3", "SKY4")));
             lumps.Add(Tuple.Create("F_START", new byte[0]));
             lumps.Add(Tuple.Create("FLOOR4_8", new byte[4096]));

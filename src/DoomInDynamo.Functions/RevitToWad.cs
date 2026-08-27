@@ -80,13 +80,22 @@ namespace DoomInDynamo
             var map = MapBuilder.Build(model, seed, itemCount, includeMonsters, out report);
 
             // ManagedDoom archives savegames into a fixed 360KB buffer with no
-            // bounds checks (SaveAndLoad): ~16 bytes per one-sided linedef, 14 per
-            // sector, ~158 per mobj. Reject a map that could overflow it when the
-            // player presses F2/F6, instead of letting quicksave crash the session
-            // mid-game with no warning.
+            // bounds checks (SaveAndLoad): ~16 bytes per one-sided linedef (+10
+            // more for a second sidedef), 14 per sector, ~158 per mobj. Reject a
+            // map that could overflow it when the player presses F2/F6, instead of
+            // letting quicksave crash the session mid-game with no warning.
+            var twoSided = 0;
+            foreach (var line in map.Linedefs)
+            {
+                if (line.BackSide >= 0)
+                {
+                    twoSided++;
+                }
+            }
             var estimatedSaveBytes = 400
                 + 14 * map.Sectors.Count
                 + 16 * map.Linedefs.Count
+                + 10 * twoSided
                 + 158 * (map.Things.Count + 64);
             if (estimatedSaveBytes > 360 * 1024)
             {

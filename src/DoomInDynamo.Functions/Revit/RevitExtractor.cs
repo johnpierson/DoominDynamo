@@ -29,7 +29,8 @@ namespace DoomInDynamo.Revit
         private const double FallbackDoorWidthFt = 3.0;
 
         /// <summary>
-        /// Reads walls, hosted doors and rooms from the active Revit document and
+        /// Reads walls, hosted doors, rooms, furniture, columns and stairs from the
+        /// active Revit document and
         /// flattens them into the pure-data <see cref="WadGen.BuildingModel"/>.
         /// Door openings are cut out of the wall centerlines here, so WadGen never
         /// has to know that doors exist. Read-only: no transactions.
@@ -80,6 +81,18 @@ namespace DoomInDynamo.Revit
             }
 
             model.Rooms = CollectRoomPoints(doc);
+
+            // The chosen level's elevation (when any wall resolved one) lets the
+            // prism collector tell floor-standing furniture from wall-hung pieces.
+            double levelElevationFt = double.PositiveInfinity;
+            LevelBucket chosenBucket;
+            if (buckets.TryGetValue(chosenName, out chosenBucket))
+            {
+                levelElevationFt = chosenBucket.Elevation;
+            }
+
+            CollectPrisms(doc, chosenName, levelElevationFt, model.Prisms);
+            CollectStairs(doc, chosenName, model.Stairs);
             model.LevelName = chosenName;
             model.DocumentTitle = string.IsNullOrEmpty(doc.Title) ? "Untitled" : doc.Title;
             return model;
@@ -292,18 +305,36 @@ namespace DoomInDynamo.Revit
                 thicknessFt = FallbackThicknessFt;
             }
 
-            // WALL_USER_HEIGHT_PARAM is "Unconnected Height". Top-constrained walls
-            // still report a usable value here; anything missing or absurdly small
-            // becomes a plain 10 ft wall - close enough for Doom.
-            double heightFt = FallbackHeightFt;
-            Parameter heightParam = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM);
-            if (heightParam != null)
+            // WALL_USER_HEIGHT_PARAM is "Unconnected Height", which goes stale the
+            // moment a wall's top is constrained or attached to an upper level - it
+            // keeps whatever value the wall had before. The bounding box measures
+            // the geometry actually built, so it wins whenever it exists and looks
+            // sane; the parameter, then a plain 10 ft, are the fallbacks.
+            double heightFt = 0.0;
+            BoundingBoxXYZ wallBox = wall.get_BoundingBox(null);
+            if (wallBox != null)
             {
-                double h = heightParam.AsDouble();
+                double h = wallBox.Max.Z - wallBox.Min.Z;
                 if (h > 1.0)
                 {
                     heightFt = h;
                 }
+            }
+            if (heightFt <= 0.0)
+            {
+                Parameter heightParam = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM);
+                if (heightParam != null)
+                {
+                    double h = heightParam.AsDouble();
+                    if (h > 1.0)
+                    {
+                        heightFt = h;
+                    }
+                }
+            }
+            if (heightFt <= 0.0)
+            {
+                heightFt = FallbackHeightFt;
             }
 
             // Every hosted door becomes a cut interval along the centerline's arc
@@ -655,6 +686,230 @@ namespace DoomInDynamo.Revit
                 rooms.Clear();
             }
             return rooms;
+        }
+
+        /// <summary>
+        /// Furniture, casework and columns on the exported level become box-shaped
+        /// obstacles. Each category is collected independently so one exotic family
+        /// blowing up a collector only costs that category, not the rest.
+        /// </summary>
+        private static void CollectPrisms(Document doc, string chosenLevelName, double levelElevationFt, List<WadGen.Prism> output)
+        {
+            // Furnishings and columns share the Prism shape on purpose: WadGen
+            // decides solid-pillar vs see-and-shoot-over purely from the height,
+            // so a 30 ft column and a 3 ft credenza need no separate tagging here.
+            CollectPrismCategory(doc, chosenLevelName, levelElevationFt, BuiltInCategory.OST_Furniture, output);
+            CollectPrismCategory(doc, chosenLevelName, levelElevationFt, BuiltInCategory.OST_Casework, output);
+            CollectPrismCategory(doc, chosenLevelName, levelElevationFt, BuiltInCategory.OST_Columns, output);
+            CollectPrismCategory(doc, chosenLevelName, levelElevationFt, BuiltInCategory.OST_StructuralColumns, output);
+        }
+
+        private static void CollectPrismCategory(Document doc, string chosenLevelName,
+            double levelElevationFt, BuiltInCategory category, List<WadGen.Prism> output)
+        {
+            // Obstacles are decoration, not the map - any API surprise (in-place
+            // families are inventive) just means this category sits the level out.
+            try
+            {
+                IList<Element> elements = new FilteredElementCollector(doc)
+                    .OfCategory(category)
+                    .WhereElementIsNotElementType()
+                    .ToElements();
+                foreach (Element element in elements)
+                {
+                    if (!IsMainModelOrPrimary(element))
+                    {
+                        continue;
+                    }
+                    if (!string.Equals(ResolveInstanceLevelName(doc, element), chosenLevelName,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue; // same level rule the doors follow
+                    }
+
+                    BoundingBoxXYZ box = element.get_BoundingBox(null);
+                    if (box == null)
+                    {
+                        continue; // no built geometry (unplaced, symbolic-only, ...)
+                    }
+                    double ex = box.Max.X - box.Min.X;
+                    double ey = box.Max.Y - box.Min.Y;
+
+                    // Wall-hung pieces (upper cabinets, shelving, vanities) start
+                    // well above the floor - the player walks UNDER them in reality,
+                    // so standing a floor block there would be wrong. Doom has no
+                    // floating boxes, so they're simply skipped.
+                    if (!double.IsPositiveInfinity(levelElevationFt) && box.Min.Z > levelElevationFt + 2.0)
+                    {
+                        continue;
+                    }
+
+                    // Height above the FLOOR, not the box's own extent, when the
+                    // level elevation is known - an item on a low plinth blocks up
+                    // to where it actually reaches.
+                    double height = double.IsPositiveInfinity(levelElevationFt)
+                        ? box.Max.Z - box.Min.Z
+                        : box.Max.Z - levelElevationFt;
+
+                    // Slivers vanish at Doom scale; anything over 30 ft a side is
+                    // more likely a furniture system or a modelling accident than
+                    // an obstacle; flat things (rugs, mats) aren't worth a sector.
+                    if (ex < 0.4 || ey < 0.4 || ex > 30.0 || ey > 30.0 || height < 0.5)
+                    {
+                        continue;
+                    }
+
+                    // World-axis-aligned box on purpose: shrink-wrapping rotated
+                    // instances via their transform isn't worth the API round-trips.
+                    // A 45-degree sofa just gets a slightly fat box, which plays fine.
+                    output.Add(new WadGen.Prism
+                    {
+                        CX = (box.Min.X + box.Max.X) / 2.0,
+                        CY = (box.Min.Y + box.Max.Y) / 2.0,
+                        DirX = 1.0,
+                        DirY = 0.0,
+                        HalfLenFt = ex / 2.0,
+                        HalfWidthFt = ey / 2.0,
+                        HeightFt = height,
+                    });
+                }
+            }
+            catch
+            {
+                // whatever this category managed to add before failing stays -
+                // a partial obstacle set is strictly better than none
+            }
+        }
+
+        /// <summary>
+        /// Stairs based on the exported level become climbable step-runs. Only the
+        /// bounding box is read - the runs/landings stairs API is a rabbit hole -
+        /// so the run is assumed to go along the box's longer plan axis.
+        /// </summary>
+        private static void CollectStairs(Document doc, string chosenLevelName, List<WadGen.StairFlight> output)
+        {
+            try
+            {
+                IList<Element> stairs = new FilteredElementCollector(doc)
+                    .OfCategory(BuiltInCategory.OST_Stairs)
+                    .WhereElementIsNotElementType()
+                    .ToElements();
+                foreach (Element element in stairs)
+                {
+                    if (!IsMainModelOrPrimary(element))
+                    {
+                        continue;
+                    }
+                    if (!string.Equals(ResolveStairBaseLevelName(doc, element), chosenLevelName,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    BoundingBoxXYZ box = element.get_BoundingBox(null);
+                    if (box == null)
+                    {
+                        continue;
+                    }
+                    double ex = box.Max.X - box.Min.X;
+                    double ey = box.Max.Y - box.Min.Y;
+                    double longer = Math.Max(ex, ey);
+                    double shorter = Math.Min(ex, ey);
+                    if (longer < 3.0)
+                    {
+                        continue; // shorter than a single stride - not a real flight
+                    }
+                    // A near-square box means a spiral stair, a switchback with a
+                    // big landing, or a multi-run assembly: the run direction can't
+                    // be inferred from the box, and steps emitted at a wrong angle
+                    // would wall off the stair. Skipping them is the lesser evil
+                    // (known limitation of the bbox-only approach).
+                    if (shorter < 1e-9 || longer / shorter < 1.3)
+                    {
+                        continue;
+                    }
+
+                    // Run along the longer axis, climbing from the min-coordinate
+                    // end: which end is really the bottom is unknowable from a
+                    // bounding box, so a flight may ascend the "wrong" way vs the
+                    // Revit model. Cosmetic only - the steps walk fine either way.
+                    double cx = (box.Min.X + box.Max.X) / 2.0;
+                    double cy = (box.Min.Y + box.Max.Y) / 2.0;
+                    bool alongX = ex >= ey;
+                    output.Add(new WadGen.StairFlight
+                    {
+                        X1 = alongX ? box.Min.X : cx,
+                        Y1 = alongX ? cy : box.Min.Y,
+                        X2 = alongX ? box.Max.X : cx,
+                        Y2 = alongX ? cy : box.Max.Y,
+                        WidthFt = Math.Min(8.0, Math.Max(2.0, shorter)),
+                        RiseFt = Math.Min(30.0, Math.Max(1.0, box.Max.Z - box.Min.Z)),
+                    });
+                }
+            }
+            catch
+            {
+                // stairs are optional; a failing collector loses only the stairs
+            }
+        }
+
+        /// <summary>Best-effort level name for a placed instance; "" when nothing
+        /// resolves, which then only matches the "" bucket - the same rule walls
+        /// and doors follow for unresolvable levels.</summary>
+        private static string ResolveInstanceLevelName(Document doc, Element element)
+        {
+            // Element.LevelId covers level-hosted instances; face- and workplane-
+            // hosted families answer InvalidElementId there but usually still carry
+            // a level in "Schedule Level" / "Base Level" parameters.
+            string name = LevelNameFromId(doc, element.LevelId);
+            if (name.Length == 0)
+            {
+                name = LevelNameFromId(doc, ParameterAsElementId(element, BuiltInParameter.FAMILY_LEVEL_PARAM));
+            }
+            if (name.Length == 0)
+            {
+                name = LevelNameFromId(doc, ParameterAsElementId(element, BuiltInParameter.FAMILY_BASE_LEVEL_PARAM));
+            }
+            if (name.Length == 0)
+            {
+                // Face-based and in-place families answer InvalidElementId from all
+                // of the above but usually still expose "Schedule Level".
+                name = LevelNameFromId(doc, ParameterAsElementId(element, BuiltInParameter.INSTANCE_SCHEDULE_ONLY_LEVEL_PARAM));
+            }
+            if (name.Length == 0)
+            {
+                name = LevelNameFromId(doc, ParameterAsElementId(element, BuiltInParameter.SCHEDULE_LEVEL_PARAM));
+            }
+            return name;
+        }
+
+        private static string ResolveStairBaseLevelName(Document doc, Element stair)
+        {
+            // Stairs keep their base level in a stairs-specific parameter; LevelId
+            // answers for most, but sketch-based/converted oddities may only reply
+            // through the "Base Level" parameter.
+            string name = LevelNameFromId(doc, stair.LevelId);
+            if (name.Length == 0)
+            {
+                name = LevelNameFromId(doc, ParameterAsElementId(stair, BuiltInParameter.STAIRS_BASE_LEVEL_PARAM));
+            }
+            return name;
+        }
+
+        private static ElementId ParameterAsElementId(Element element, BuiltInParameter builtInParameter)
+        {
+            Parameter parameter = element.get_Parameter(builtInParameter);
+            return parameter != null ? parameter.AsElementId() : null;
+        }
+
+        private static string LevelNameFromId(Document doc, ElementId levelId)
+        {
+            if (levelId == null || levelId == ElementId.InvalidElementId)
+            {
+                return "";
+            }
+            Level level = doc.GetElement(levelId) as Level;
+            return level != null ? (level.Name ?? "") : "";
         }
     }
 }
