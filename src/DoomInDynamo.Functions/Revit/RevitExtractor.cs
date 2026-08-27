@@ -70,7 +70,7 @@ namespace DoomInDynamo.Revit
             var model = new WadGen.BuildingModel();
             foreach (Wall wall in keptWalls)
             {
-                ExtractWall(wall, doorsByHost, model.Walls);
+                ExtractWall(wall, doorsByHost, model.Walls, model.Doors);
             }
 
             if (model.Walls.Count == 0)
@@ -243,7 +243,7 @@ namespace DoomInDynamo.Revit
         }
 
         private static void ExtractWall(Wall wall, Dictionary<long, List<FamilyInstance>> doorsByHost,
-            List<WadGen.WallSegment> output)
+            List<WadGen.WallSegment> output, List<WadGen.DoorOpening> doorOutput)
         {
             Curve curve = ((LocationCurve)wall.Location).Curve;
             if (curve == null)
@@ -330,10 +330,58 @@ namespace DoomInDynamo.Revit
                 }
             }
 
-            foreach ((double Start, double End) keep in KeepIntervals(cuts, totalLength))
+            List<(double Start, double End)> merged = MergeCuts(cuts, totalLength);
+
+            foreach ((double Start, double End) keep in KeepIntervals(merged, totalLength))
             {
                 EmitRun(pts, stations, keep.Start, keep.End, thicknessFt, heightFt, output);
             }
+
+            // Each merged opening also becomes a working in-game door standing in
+            // the gap: report where it sits, which way the wall runs there, and how
+            // wide the hole is - WadGen builds the door sector from that.
+            foreach ((double Start, double End) cut in merged)
+            {
+                double centerStation = (cut.Start + cut.End) / 2.0;
+                (double X, double Y) center = PointAtStation(pts, stations, centerStation);
+                (double X, double Y) dir = DirectionAtStation(pts, stations, centerStation);
+                if (dir.X == 0.0 && dir.Y == 0.0)
+                {
+                    continue;
+                }
+
+                doorOutput.Add(new WadGen.DoorOpening
+                {
+                    CX = center.X,
+                    CY = center.Y,
+                    DirX = dir.X,
+                    DirY = dir.Y,
+                    WidthFt = cut.End - cut.Start,
+                    ThicknessFt = thicknessFt,
+                });
+            }
+        }
+
+        /// <summary>Unit direction of the polyline segment containing the station
+        /// (zero vector if the polyline is degenerate there).</summary>
+        private static (double X, double Y) DirectionAtStation(List<(double X, double Y)> pts,
+            double[] stations, double station)
+        {
+            int last = pts.Count - 1;
+            int segment = last - 1;
+            for (int i = 0; i < last; i++)
+            {
+                if (station <= stations[i + 1])
+                {
+                    segment = i;
+                    break;
+                }
+            }
+
+            double dx = pts[segment + 1].X - pts[segment].X;
+            double dy = pts[segment + 1].Y - pts[segment].Y;
+            double length = Math.Sqrt(dx * dx + dy * dy);
+            return length > 1e-9 ? (dx / length, dy / length) : (0.0, 0.0);
         }
 
         private static double GetDoorWidthFt(FamilyInstance door)
@@ -366,19 +414,19 @@ namespace DoomInDynamo.Revit
             return value > 0.0 ? value : 0.0;
         }
 
-        /// <summary>Complement of the (merged) cut intervals within [0, totalLength] -
-        /// i.e. the stretches of centerline that stay solid wall.</summary>
-        private static List<(double Start, double End)> KeepIntervals(
+        /// <summary>Cut intervals clamped to [0, totalLength], sorted and merged -
+        /// overlapping doors (double doors, close pairs) become one opening instead
+        /// of producing slivers between them.</summary>
+        private static List<(double Start, double End)> MergeCuts(
             List<(double Start, double End)> cuts, double totalLength)
         {
-            var keeps = new List<(double Start, double End)>();
+            var merged = new List<(double Start, double End)>();
             if (totalLength <= 0.0)
             {
-                return keeps;
+                return merged;
             }
 
             cuts.Sort((a, b) => a.Start.CompareTo(b.Start));
-            var merged = new List<(double Start, double End)>();
             foreach ((double Start, double End) cut in cuts)
             {
                 double start = Math.Max(0.0, cut.Start);
@@ -389,8 +437,6 @@ namespace DoomInDynamo.Revit
                 }
                 if (merged.Count > 0 && start <= merged[merged.Count - 1].End)
                 {
-                    // Overlapping doors (double doors, close pairs) merge into one
-                    // opening instead of producing slivers between them.
                     merged[merged.Count - 1] = (merged[merged.Count - 1].Start,
                         Math.Max(merged[merged.Count - 1].End, end));
                 }
@@ -398,6 +444,20 @@ namespace DoomInDynamo.Revit
                 {
                     merged.Add((start, end));
                 }
+            }
+
+            return merged;
+        }
+
+        /// <summary>Complement of the merged cut intervals within [0, totalLength] -
+        /// i.e. the stretches of centerline that stay solid wall.</summary>
+        private static List<(double Start, double End)> KeepIntervals(
+            List<(double Start, double End)> merged, double totalLength)
+        {
+            var keeps = new List<(double Start, double End)>();
+            if (totalLength <= 0.0)
+            {
+                return keeps;
             }
 
             double cursor = 0.0;

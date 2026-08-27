@@ -94,6 +94,11 @@ namespace WadSmokeTest
             // Angled wall.
             AddWall(model, 26, 5, 36, 11, t, h);
 
+            // Working doors standing in both gaps (what RevitExtractor emits per
+            // merged door cut).
+            model.Doors.Add(new DoorOpening { CX = 10, CY = 0, DirX = 1, DirY = 0, WidthFt = 3.5, ThicknessFt = t });
+            model.Doors.Add(new DoorOpening { CX = 22, CY = 14, DirX = 0, DirY = 1, WidthFt = 4.0, ThicknessFt = t });
+
             model.Rooms.Add(new RoomPoint { X = 10, Y = 15 });
             model.Rooms.Add(new RoomPoint { X = 30, Y = 22 });
 
@@ -242,7 +247,9 @@ namespace WadSmokeTest
 
         private static void ValidateSlot(ParsedMap map, string slot, List<Tuple<string, byte[]>> lumps, int slotStart)
         {
-            Check(map.SectorCount == 1, slot + ": one sector");
+            // One big sector plus one per working door (both synthetic doors are
+            // wide enough to build).
+            Check(map.SectorCount == 3, slot + ": one main sector + two door sectors");
             Check(map.Vertices.Length > 0 && map.Linedefs.Length >= 8, slot + ": has geometry");
             Check(map.Segs.Length > 0 && map.Subsectors.Length > 0 && map.Nodes.Length > 0, slot + ": has BSP");
 
@@ -259,9 +266,32 @@ namespace WadSmokeTest
             ok = true;
             foreach (var side in map.Sidedefs)
             {
-                ok &= side[2] == 0;
+                ok &= InRange(side[2], map.SectorCount);
             }
-            Check(ok, slot + ": all sidedefs reference sector 0");
+            Check(ok, slot + ": all sidedefs reference a real sector");
+
+            // Door mechanics as data: each door contributes two usable DR faces
+            // (special 1) whose back sector is closed (ceiling == floor), plus the
+            // one S1 exit on the boundary.
+            var drFaces = 0;
+            var exits = 0;
+            ok = true;
+            foreach (var line in map.Linedefs)
+            {
+                if (line[3] == 1)
+                {
+                    drFaces++;
+                    ok &= line[6] != -1;
+                    ok &= (line[2] & 0x0004) != 0; // two-sided flag
+                }
+                if (line[3] == 11)
+                {
+                    exits++;
+                }
+            }
+            Check(drFaces == 4, slot + ": four DR door faces (two per door)");
+            Check(exits == 1, slot + ": exactly one exit switch");
+            Check(ok, slot + ": door faces are two-sided with a back sector");
 
             ok = true;
             foreach (var seg in map.Segs)
@@ -269,8 +299,11 @@ namespace WadSmokeTest
                 ok &= InRange(seg[0], map.Vertices.Length) && InRange(seg[1], map.Vertices.Length);
                 ok &= InRange(seg[3], map.Linedefs.Length);
                 ok &= seg[4] == 0 || seg[4] == 1;
-                // One-sided map: every seg must be a front seg with a real sidedef.
-                ok &= seg[4] == 0;
+                // A back-side seg is only legal on a linedef that has a back sidedef.
+                if (seg[4] == 1)
+                {
+                    ok &= map.Linedefs[seg[3]][6] != -1;
+                }
             }
             Check(ok, slot + ": seg references valid");
 
@@ -456,6 +489,43 @@ namespace WadSmokeTest
                     maxY = Math.Max(maxY, v[1]);
                 }
 
+                // Door mechanics through the real engine: use a DR face, watch the
+                // door sector's ceiling rise off the floor, then watch it come back
+                // down after the engine's wait. Done at tic 0, before the monsters
+                // are awake enough to wander into the doorway and hold it open.
+                LineDef doorLine = null;
+                foreach (var line in world.Map.Lines)
+                {
+                    if ((int)line.Special == 1 && line.BackSector != null)
+                    {
+                        doorLine = line;
+                        break;
+                    }
+                }
+                Check(doorLine != null, "map has a usable DR door line");
+                if (doorLine != null)
+                {
+                    var doorSector = doorLine.BackSector;
+                    Check(doorSector.CeilingHeight.Data == doorSector.FloorHeight.Data, "door starts closed");
+
+                    world.MapInteraction.UseSpecialLine(player.Mobj, doorLine, 0);
+                    var openedTo = 0;
+                    var closedAgain = false;
+                    for (var i = 0; i < 400; i++)
+                    {
+                        world.Update();
+                        var height = doorSector.CeilingHeight.Data;
+                        openedTo = Math.Max(openedTo, height);
+                        if (i > 100 && height == doorSector.FloorHeight.Data)
+                        {
+                            closedAgain = true;
+                            break;
+                        }
+                    }
+                    Check(openedTo > 0, "door opened on use (rose " + (openedTo >> 16) + " units)");
+                    Check(closedAgain, "door closed again after its wait");
+                }
+
                 var exceptions = 0;
                 var escaped = false;
                 var tics = 0;
@@ -525,8 +595,9 @@ namespace WadSmokeTest
                     "player actually moved (or died trying: " + player.PlayerState + ")");
 
                 // Cross-check PointInSubsector against the same random points the
-                // structural walk used - it must resolve without throwing and land
-                // in sector 0 every time.
+                // structural walk used - it must resolve without throwing to a real
+                // sector every time (points inside a doorway legitimately land in
+                // that door's sector rather than the main one).
                 var rng = new Random(7);
                 var ok = true;
                 for (var i = 0; i < 500; i++)
@@ -534,9 +605,9 @@ namespace WadSmokeTest
                     var px = minX + rng.NextDouble() * (maxX - minX);
                     var py = minY + rng.NextDouble() * (maxY - minY);
                     var ss = Geometry.PointInSubsector(Fixed.FromDouble(px), Fixed.FromDouble(py), world.Map);
-                    ok &= ss != null && ss.Sector == world.Map.Sectors[0];
+                    ok &= ss != null && ss.Sector != null && Array.IndexOf(world.Map.Sectors, ss.Sector) >= 0;
                 }
-                Check(ok, "engine PointInSubsector resolves 500 random points to sector 0");
+                Check(ok, "engine PointInSubsector resolves 500 random points to a real sector");
             }
         }
 
@@ -554,6 +625,7 @@ namespace WadSmokeTest
             lumps.Add(Tuple.Create("COLORMAP", new byte[34 * 256]));
             lumps.Add(Tuple.Create("TEXTURE1", BuildTexture1(
                 "STARTAN3", "STONE2", "BROWN1", "SLADWALL", "BROWNGRN",
+                "BIGDOOR2", "DOORTRAK",
                 "SKY1", "SKY2", "SKY3", "SKY4")));
             lumps.Add(Tuple.Create("F_START", new byte[0]));
             lumps.Add(Tuple.Create("FLOOR4_8", new byte[4096]));

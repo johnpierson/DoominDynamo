@@ -19,7 +19,8 @@ namespace DoomInDynamo
         /// (PWAD) with randomly placed items and monsters. Wire the resulting
         /// wadPath into the Doom Player node's pwad input, browse a real IWAD
         /// (doom1.wad, DOOM2.WAD, Freedoom, ...), press Start, and walk your
-        /// building. Doors become openings; each level exports separately.
+        /// building. Doors become real working Doom doors (press Space to open);
+        /// Tab shows your floor plan as the automap; each level exports separately.
         /// </summary>
         /// <param name="wadPath">Where to write the .wad. Empty = a file named after the document under %TEMP%\DoomInDynamo.</param>
         /// <param name="seed">Random seed for item placement - change it to reshuffle the pickups and monsters.</param>

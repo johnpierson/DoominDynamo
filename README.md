@@ -53,6 +53,8 @@ add the node, no config file editing needed.
    - Mouse - turn left/right (once you're actually in a level - see [Mouse](#mouse))
    - `Left Alt` - fire
    - `Space` - use / open doors
+   - `Tab` - automap (Doom's built-in minimap: your floor plan, live; `+`/`-`
+     zoom, `F` follow mode, `G` grid)
    - `1`-`7` - switch weapon
    - `Esc` - menu (also lets you quit back to idle, and lets go of the mouse)
 5. Click **Stop** to pause the engine (e.g. before saving a large graph) - it
@@ -75,8 +77,12 @@ run it reads the active Revit document and writes a PWAD:
   in one big sector, at 16 map units per foot - a 3 ft door reads as a proper
   48-unit Doom doorway. Oversized sites are auto-scaled down to fit Doom's
   16-bit coordinate space.
-- **Doors become openings.** Any door hosted on a wall cuts a door-width gap in
-  it, so rooms connect exactly where the architect said they should.
+- **Doors become doors.** Any door hosted on a wall cuts a door-width gap in
+  it, and a real working Doom door stands in the gap: a closed slab (classic
+  "DR" type 1 - BIGDOOR2 face, DOORTRAK jambs) that opens when you press
+  Space on either side, waits, and closes again. Monsters can open them too,
+  exactly like the originals. Rooms connect where the architect said they
+  should - but you still have to open the door.
 - **Which level?** By default the Revit level with the most walls; pass
   `levelName` to pick another. One level per WAD - Doom's engine is 2.5D and has
   no room-over-room, so multi-storey exports are one-floor-at-a-time by design.
@@ -92,6 +98,11 @@ run it reads the active Revit document and writes a PWAD:
   writes to `%TEMP%\DoomInDynamo\<document>.wad`) and `report` (what was
   exported, how many things were placed, and one hint: an exit switch hides
   somewhere on the outer boundary - hug the edge and press Space).
+- **Common mix-up**: don't point Doom Player's **Browse WAD...** button at the
+  generated file - it's a map-only PWAD with no textures/sprites/palette in it
+  (the engine would fail with "The lump 'PLAYPAL' was not found"; the node now
+  catches this and says so). Browse a real IWAD there, wire `wadPath` into the
+  `pwad` *input port*, run the graph, then Start.
 
 Because ManagedDoom is a faithful vanilla port it builds nothing at load time -
 the exporter therefore writes *complete* maps: real BSP nodes (SEGS, SSECTORS,
@@ -187,7 +198,8 @@ DoomInDynamo.Functions      <- zero-touch node library (also in pkg.json's
 
   Revit\RevitExtractor       <- the ONLY file touching Autodesk.Revit.DB /
                                 RevitServices: walls -> centerline segments
-                                (door gaps pre-cut), rooms -> placement hints.
+                                (door gaps pre-cut, plus a DoorOpening record
+                                per gap), rooms -> placement hints.
                                 No Revit type appears in any signature, so the
                                 assembly still imports cleanly in Sandbox where
                                 RevitAPI.dll doesn't exist; the node just

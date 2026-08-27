@@ -115,8 +115,14 @@ namespace DoomInDynamo.WadGen
     internal static class DoomConst
     {
         public const int LineFlagBlocking = 0x0001;
+        public const int LineFlagTwoSided = 0x0004;
+        public const int LineFlagUpperUnpegged = 0x0008;
 
         public const int ThingAllSkills = 0x0007;
+
+        // "DR" manual door: opens on use from either side (acts on the line's back
+        // sector), waits, closes again; monsters can open it too.
+        public const int SpecialDRDoor = 1;
 
         public const int SpecialS1Exit = 11;
 

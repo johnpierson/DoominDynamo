@@ -32,6 +32,15 @@ namespace DoomInDynamo.WadGen
         private const string FloorFlat = "FLOOR4_8";
         private const string CeilingFlat = "CEIL3_5";
 
+        // Both in shareware Doom 1, Doom 2 and Freedoom, like every other name here.
+        private const string DoorTexture = "BIGDOOR2";
+        private const string DoorTrackTexture = "DOORTRAK";
+
+        // The door box sits inside the opening, inset from the wall's cut ends so
+        // its jamb lines never coincide with the pillar end caps (coincident
+        // linedefs with contradicting sector references confuse the BSP).
+        private const double DoorInset = 4.0;
+
         private sealed class ThingDef
         {
             public readonly int Type;
@@ -172,6 +181,15 @@ namespace DoomInDynamo.WadGen
                 throw new InvalidOperationException("All walls were too short to convert at this scale.");
             }
 
+            var doorCount = 0;
+            foreach (var door in model.Doors)
+            {
+                if (AddDoorBox(door, centerX, centerY, scale))
+                {
+                    doorCount++;
+                }
+            }
+
             AddBoundary();
 
             var rng = new Random(seed);
@@ -182,6 +200,7 @@ namespace DoomInDynamo.WadGen
             Report =
                 "Exported level '" + model.LevelName + "' from '" + model.DocumentTitle + "': " +
                 walls.Count + " wall segments -> " + pillarCount + " pillars, " +
+                doorCount + " working doors (press Space to open), " +
                 map.Linedefs.Count + " linedefs, ceiling " + map.Sectors[0].CeilingHeight +
                 " units, scale " + scale.ToString("0.##", CultureInfo.InvariantCulture) +
                 " units/ft. " + playerNote + " " + itemNote +
@@ -229,6 +248,125 @@ namespace DoomInDynamo.WadGen
 
             var texture = WallTextures[pillarIndex % WallTextures.Length];
             AddLoop(corners, texture, 0);
+            pillarPolygons.Add(corners);
+            return true;
+        }
+
+        /// <summary>
+        /// Stands a working Doom door in a wall opening: a new sector whose ceiling
+        /// starts at floor height (closed) and raises to the surrounding ceiling
+        /// minus 4 when used - the classic manual door. The box is a free-standing
+        /// rectangle of four two-sided linedefs, fronts facing the surrounding
+        /// sector: the two faces along the wall carry the door texture and the DR
+        /// special (usable from both sides, and monsters can open it), the two jamb
+        /// edges get the door track with the upper-unpegged flag so the track
+        /// doesn't scroll while the door moves.
+        /// </summary>
+        private bool AddDoorBox(DoorOpening door, double centerX, double centerY, double scale)
+        {
+            var length = Math.Sqrt(door.DirX * door.DirX + door.DirY * door.DirY);
+            if (length < 1e-9)
+            {
+                return false;
+            }
+
+            var dx = door.DirX / length;
+            var dy = door.DirY / length;
+            var nx = -dy;
+            var ny = dx;
+
+            var cx = (door.CX - centerX) * scale;
+            var cy = (door.CY - centerY) * scale;
+
+            var halfLen = door.WidthFt * scale / 2.0 - DoorInset;
+            var halfW = Math.Max(door.ThicknessFt * scale / 2.0, 3.0);
+            if (halfLen < 12.0)
+            {
+                // Too narrow to work as a door at this scale - leave the opening open.
+                return false;
+            }
+
+            var corners = new[]
+            {
+                new[] { cx - dx * halfLen + nx * halfW, cy - dy * halfLen + ny * halfW },
+                new[] { cx + dx * halfLen + nx * halfW, cy + dy * halfLen + ny * halfW },
+                new[] { cx + dx * halfLen - nx * halfW, cy + dy * halfLen - ny * halfW },
+                new[] { cx - dx * halfLen - nx * halfW, cy - dy * halfLen - ny * halfW },
+            };
+
+            // Same winding rule as the pillars: CCW puts each edge's front side on
+            // the OUTSIDE, toward the surrounding sector.
+            if (SignedArea(corners) < 0)
+            {
+                Array.Reverse(corners);
+            }
+
+            map.Sectors.Add(new MapSector
+            {
+                FloorHeight = 0,
+                CeilingHeight = 0, // closed - the engine raises it on use
+                FloorFlat = FloorFlat,
+                CeilingFlat = CeilingFlat,
+                LightLevel = 192,
+                Special = 0,
+                Tag = 0
+            });
+            var doorSector = map.Sectors.Count - 1;
+
+            var indices = new int[corners.Length];
+            for (var i = 0; i < corners.Length; i++)
+            {
+                var x = (int)Math.Round(corners[i][0]);
+                var y = (int)Math.Round(corners[i][1]);
+                indices[i] = GetVertex(x, y);
+
+                // Grow the play-area bbox too: a door can outlive its wall (a short
+                // wall gets dropped, its opening doesn't), and the boundary computed
+                // from pillar corners alone could otherwise leave it in the void.
+                pillarMinX = Math.Min(pillarMinX, x);
+                pillarMinY = Math.Min(pillarMinY, y);
+                pillarMaxX = Math.Max(pillarMaxX, x);
+                pillarMaxY = Math.Max(pillarMaxY, y);
+            }
+
+            for (var i = 0; i < corners.Length; i++)
+            {
+                var next = (i + 1) % corners.Length;
+                if (indices[i] == indices[next])
+                {
+                    continue;
+                }
+
+                // Edges running along the wall are the door faces; the two across
+                // it are the jambs/tracks.
+                var edgeDx = corners[next][0] - corners[i][0];
+                var edgeDy = corners[next][1] - corners[i][1];
+                var isFace = Math.Abs(edgeDx * dx + edgeDy * dy) > Math.Abs(edgeDx * nx + edgeDy * ny);
+
+                var texture = isFace ? DoorTexture : DoorTrackTexture;
+
+                map.Sidedefs.Add(new MapSidedef { Upper = texture, Sector = 0 });
+                var front = map.Sidedefs.Count - 1;
+                map.Sidedefs.Add(new MapSidedef { Upper = texture, Sector = doorSector });
+                var back = map.Sidedefs.Count - 1;
+
+                map.Linedefs.Add(new MapLinedef
+                {
+                    V1 = indices[i],
+                    V2 = indices[next],
+                    Flags = isFace
+                        ? DoomConst.LineFlagTwoSided
+                        : DoomConst.LineFlagTwoSided | DoomConst.LineFlagUpperUnpegged,
+                    Special = isFace ? DoomConst.SpecialDRDoor : 0,
+                    Tag = 0,
+                    FrontSide = front,
+                    BackSide = back
+                });
+            }
+
+            // Keep things (and the player start) out of the doorway - anything
+            // spawned inside a closed door sector is crushed into the zero-height
+            // gap and stuck.
             pillarPolygons.Add(corners);
             return true;
         }

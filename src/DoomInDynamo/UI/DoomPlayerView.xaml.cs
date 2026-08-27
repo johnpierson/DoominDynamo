@@ -133,6 +133,52 @@ namespace DoomInDynamo.UI
             }
         }
 
+        /// <summary>Scans a WAD's directory for a lump name (case-insensitive).
+        /// Returns true on any parse trouble - this is a pre-flight nicety, and
+        /// genuinely broken files should get the engine's own error, not ours.</summary>
+        private static bool WadContainsLump(string path, string lumpName)
+        {
+            try
+            {
+                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read))
+                using (var reader = new BinaryReader(stream))
+                {
+                    var identification = new string(reader.ReadChars(4));
+                    if (identification != "IWAD" && identification != "PWAD")
+                    {
+                        return true;
+                    }
+
+                    var lumpCount = reader.ReadInt32();
+                    var directoryOffset = reader.ReadInt32();
+                    if (lumpCount < 0 || lumpCount > 65536 ||
+                        directoryOffset < 0 || directoryOffset + 16L * lumpCount > stream.Length)
+                    {
+                        return true;
+                    }
+
+                    stream.Seek(directoryOffset, SeekOrigin.Begin);
+                    for (var i = 0; i < lumpCount; i++)
+                    {
+                        reader.ReadInt32(); // position
+                        reader.ReadInt32(); // size
+                        var nameBytes = reader.ReadBytes(8);
+                        var name = System.Text.Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
+                        if (string.Equals(name, lumpName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                }
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
         private void StartGame()
         {
             if (string.IsNullOrWhiteSpace(model.WadPath) || !File.Exists(model.WadPath))
@@ -158,6 +204,18 @@ namespace DoomInDynamo.UI
                 // far less helpful error, and silently dropping the map would look
                 // like the export never worked.
                 StatusText.Text = "PWAD not found: " + pwad;
+                return;
+            }
+
+            // The classic mix-up: browsing a map-only PWAD (e.g. the RevitToWad
+            // export) as the main WAD. The engine would only say "The lump 'PLAYPAL'
+            // was not found" - PLAYPAL is the palette every real IWAD carries and
+            // map-only files don't - so catch it here with an actionable message.
+            if (!WadContainsLump(model.WadPath, "PLAYPAL"))
+            {
+                StatusText.Text = "That file is a map-only PWAD (no game data in it). Browse a real IWAD "
+                    + "here (doom1.wad, DOOM.WAD, DOOM2.WAD, Freedoom) and wire the generated map "
+                    + "into the node's pwad input instead.";
                 return;
             }
 
