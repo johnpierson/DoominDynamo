@@ -1,7 +1,12 @@
 # DoomInDynamo
 
-A Dynamo package that adds one node - **Doom Player** - which runs a real, playable
-copy of Doom on the node's face inside Dynamo (Sandbox or Dynamo for Revit).
+A Dynamo package that adds two nodes:
+
+- **Doom Player** - runs a real, playable copy of Doom on the node's face inside
+  Dynamo (Sandbox or Dynamo for Revit).
+- **RevitToWad.Export** - converts the current Revit document's walls into a
+  playable Doom map (a PWAD) with randomly scattered items and monsters. Wire its
+  `wadPath` output into Doom Player's `pwad` input and walk your own building.
 
 It works by embedding [ManagedDoom](https://github.com/sinshu/managed-doom) (a
 C# port of the original Doom source release) directly in a `NodeModel` + WPF
@@ -54,7 +59,46 @@ add the node, no config file editing needed.
    fully tears down the running session rather than just hiding the view.
 
 The node's one output port emits `"running"` or `"idle"` if you want to wire
-something (a Watch node, a conditional, whatever) off its state.
+something (a Watch node, a conditional, whatever) off its state. Its optional
+`pwad` input takes a path to a map WAD (e.g. from **RevitToWad.Export**) that is
+loaded on top of the browsed IWAD via the engine's `-file` mechanism - the PWAD's
+map lumps override the IWAD's, so starting a new game drops you into the custom map.
+
+## Revit -> WAD: play your building
+
+Add a **RevitToWad.Export** node (same `DoomInDynamo` category, only functional
+in Dynamo *for Revit* - in Sandbox it politely reports that it needs Revit). On
+run it reads the active Revit document and writes a PWAD:
+
+- **Walls become solid Doom walls.** Each wall's centerline (curved walls are
+  tessellated) is extruded by its real thickness into a solid "pillar" standing
+  in one big sector, at 16 map units per foot - a 3 ft door reads as a proper
+  48-unit Doom doorway. Oversized sites are auto-scaled down to fit Doom's
+  16-bit coordinate space.
+- **Doors become openings.** Any door hosted on a wall cuts a door-width gap in
+  it, so rooms connect exactly where the architect said they should.
+- **Which level?** By default the Revit level with the most walls; pass
+  `levelName` to pick another. One level per WAD - Doom's engine is 2.5D and has
+  no room-over-room, so multi-storey exports are one-floor-at-a-time by design.
+- **Random items.** `seed`-driven placement of health, armor, ammo, weapons,
+  barrels - and monsters unless `includeMonsters` is false (all of it is
+  rejection-sampled to stay out of walls; every thing type used exists even in
+  shareware Doom 1). Change `seed` to reshuffle, `itemCount` (default 75) to
+  crowd or thin the map.
+- **Both map slots.** The file contains the same map as `E1M1` *and* `MAP01`,
+  so it works whether the IWAD you browse in Doom Player is Doom 1-family or
+  Doom 2-family (including Freedoom).
+- **Outputs**: `wadPath` (feed this to Doom Player's `pwad` input; empty input
+  writes to `%TEMP%\DoomInDynamo\<document>.wad`) and `report` (what was
+  exported, how many things were placed, and one hint: an exit switch hides
+  somewhere on the outer boundary - hug the edge and press Space).
+
+Because ManagedDoom is a faithful vanilla port it builds nothing at load time -
+the exporter therefore writes *complete* maps: real BSP nodes (SEGS, SSECTORS,
+NODES built by its own recursive seg partitioner), a real collision BLOCKMAP,
+and a REJECT table, not just the editing lumps. Windows stay solid, curtain
+walls export at a fallback thickness, and overlapping walls simply overlap -
+Doom doesn't mind.
 
 ## Sound
 
@@ -133,6 +177,39 @@ WpfUserInput : IUserInput     <- Reads a HashSet<DoomKey> that DoomPlayerView's
   (Engine/)                     PreviewKeyDown/Up handlers maintain, instead of
                                  SilkUserInput's live Silk.NET keyboard polling.
 ```
+
+The exporter lives in a second, deliberately WPF-free assembly:
+
+```
+DoomInDynamo.Functions      <- zero-touch node library (also in pkg.json's
+  (src/DoomInDynamo.Functions)  node_libraries). One public class, RevitToWad -
+                                Dynamo imports exactly one node from it.
+
+  Revit\RevitExtractor       <- the ONLY file touching Autodesk.Revit.DB /
+                                RevitServices: walls -> centerline segments
+                                (door gaps pre-cut), rooms -> placement hints.
+                                No Revit type appears in any signature, so the
+                                assembly still imports cleanly in Sandbox where
+                                RevitAPI.dll doesn't exist; the node just
+                                reports "needs Dynamo for Revit" when run there.
+
+  WadGen\MapBuilder          <- feet -> map units, wall pillars + sealed outer
+                                boundary + sector, seeded random thing placement.
+  WadGen\BspBuilder          <- recursive seg partitioner emitting vanilla
+                                SEGS/SSECTORS/NODES (front = right side of the
+                                partition, exactly matching Geometry.PointOnSide).
+  WadGen\BlockmapBuilder     <- collision grid, offsets aimed at each list's
+                                first real entry (ManagedDoom reads from the
+                                offset target itself).
+  WadGen\WadWriter           <- PWAD serialization, E1M1 + MAP01 slots.
+```
+
+`tools/WadSmokeTest/` is a console harness (never packaged) that runs the whole
+pipeline on a synthetic building and then boots the *real* engine on the result -
+`GameContent.CreateDummy` plus a stub resource WAD stands in for an IWAD - and
+simulates ~500 tics of a player charging around while monsters wake up, plus
+structural validation of every lump. `dotnet run --project tools\WadSmokeTest`
+should end with `ALL CHECKS PASSED`.
 
 `vendor/ManagedDoom/` holds a trimmed copy of the upstream engine (platform
 code stripped out - see `vendor/ManagedDoom/VENDOR_NOTICE.md` for exactly what

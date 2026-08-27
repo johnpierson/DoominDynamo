@@ -141,9 +141,29 @@ namespace DoomInDynamo.UI
                 return;
             }
 
+            // The optional "pwad" input arrives via the model's DataBridge callback
+            // (see DoomPlayerNodeModel.PwadPath). Reading it here, at Start time, is
+            // the simple-and-correct order of operations: the user runs the graph
+            // (which evaluates the input and bridges it back) and then clicks Start -
+            // so no PwadPathChanged subscription is needed, and there's nothing to
+            // unsubscribe in StopGame/Dispose either.
+            var pwad = model.PwadPath;
+            if (string.IsNullOrWhiteSpace(pwad))
+            {
+                pwad = null;
+            }
+            else if (!File.Exists(pwad))
+            {
+                // Fail loudly before touching the engine: GameContent would throw a
+                // far less helpful error, and silently dropping the map would look
+                // like the export never worked.
+                StatusText.Text = "PWAD not found: " + pwad;
+                return;
+            }
+
             try
             {
-                session = new DoomSession(model.WadPath);
+                session = new DoomSession(model.WadPath, pwad);
             }
             catch (Exception ex)
             {
@@ -161,7 +181,13 @@ namespace DoomInDynamo.UI
 
             running = true;
             StartStopButton.Content = "Stop";
-            StatusText.Text = "Running (audio: " + session.AudioStatus + ")";
+            var runningStatus = "Running (audio: " + session.AudioStatus + ")";
+            if (pwad != null)
+            {
+                runningStatus += " | map: " + Path.GetFileName(pwad);
+            }
+
+            StatusText.Text = runningStatus;
 
             session.MouseGrabChanged += OnMouseGrabChanged;
 
