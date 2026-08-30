@@ -83,6 +83,12 @@ run it reads the active Revit document and writes a PWAD:
   Space on either side, waits, and closes again. Monsters can open them too,
   exactly like the originals. Rooms connect where the architect said they
   should - but you still have to open the door.
+- **Windows become windows.** Hosted windows cut an opening between their
+  real sill and head heights: you (and monsters) see through it, hitscan and
+  projectiles fly through it, but nobody walks through it - the "glass" is a
+  blocking flag on the opening's two-sided lines, which vanilla Doom's
+  movement code respects while its bullets ignore. A window that overlaps a
+  doorway defers to the door, and ribbon glazing merges into one opening.
 - **Real heights.** The room ceiling comes from the length-weighted *median*
   wall height (one tall atrium wall doesn't raise the whole roof), and walls
   meaningfully shorter than it become **low walls** at their true geometric
@@ -96,10 +102,19 @@ run it reads the active Revit document and writes a PWAD:
 - **A findable exit.** A switch-faced pedestal stands just outside the
   building's north-east corner - press Space on any side of it to finish the
   level (the automap, `Tab`, makes it easy to spot).
-- **Which level?** By default the Revit level with the most walls; pass
-  `levelName` to pick another. One level per WAD - Doom's engine is 2.5D and has
-  no room-over-room, so multi-storey exports are one-floor-at-a-time by design
-  (a multi-storey stair exports just its first climbable rise).
+- **Which level - or all of them?** By default the Revit level with the most
+  walls; pass `levelName` to pick another, or pass `"*"` to export the WHOLE
+  model: Doom's engine is 2.5D with no room-over-room, so the storeys can't
+  stack - instead every level becomes its own cluster, laid out west-to-east
+  (lowest level first) with walkable 30 ft gaps between them, all inside one
+  boundary. One map, the entire building, exploded-axon style. (A multi-storey
+  stair still exports just its first climbable rise.)
+- **Curtain walls are glass.** Glazed panels export as see-through window
+  bands (adjacent panels weld into ribbons), curtain wall *doors* work like
+  any other door - panels have no location point or level of their own, so
+  position, width and storey come from the panel's bounding box and
+  grid-driven Width. Spandrel panels can't be told apart from glazing, so
+  they read as glass too.
 - **Random items.** `seed`-driven placement of health, armor, ammo, weapons,
   barrels - and monsters unless `includeMonsters` is false (all of it is
   rejection-sampled to stay out of walls; every thing type used exists even in

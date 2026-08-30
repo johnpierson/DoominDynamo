@@ -222,6 +222,15 @@ namespace DoomInDynamo.WadGen
                 }
             }
 
+            var windowCount = 0;
+            foreach (var window in model.Windows)
+            {
+                if (AddWindowBox(window, centerX, centerY, scale, windowCount))
+                {
+                    windowCount++;
+                }
+            }
+
             var prismCount = 0;
             foreach (var prism in model.Prisms)
             {
@@ -252,6 +261,7 @@ namespace DoomInDynamo.WadGen
                 "Exported level '" + model.LevelName + "' from '" + model.DocumentTitle + "': " +
                 walls.Count + " wall segments -> " + pillarCount + " walls, " +
                 doorCount + " working doors (press Space to open), " +
+                windowCount + " see-through windows, " +
                 prismCount + " furnishings/columns, " + stairCount + " stair flights, " +
                 map.Linedefs.Count + " linedefs, ceiling " + map.Sectors[0].CeilingHeight +
                 " units, scale " + scale.ToString("0.##", CultureInfo.InvariantCulture) +
@@ -701,6 +711,285 @@ namespace DoomInDynamo.WadGen
             return entries[entries.Count - 1][0];
         }
 
+        /// <summary>Pulls a box's ends inward until its jamb cross-lines no longer
+        /// cross any existing pillar outline - a door or window near a wall
+        /// junction would otherwise thread its two-sided box straight through the
+        /// adjacent wall's solid loop.</summary>
+        private void TrimEndsClearOfPillars(double cx, double cy, double dx, double dy,
+            double nx, double ny, double halfW, ref double negHalf, ref double posHalf)
+        {
+            for (var attempt = 0; attempt < 8; attempt++)
+            {
+                var trimmed = false;
+                foreach (var sign in new[] { -1.0, 1.0 })
+                {
+                    var half = sign < 0 ? negHalf : posHalf;
+                    if (half <= 4.0)
+                    {
+                        continue;
+                    }
+
+                    var jx = cx + sign * dx * half;
+                    var jy = cy + sign * dy * half;
+                    var ax = jx + nx * halfW;
+                    var ay = jy + ny * halfW;
+                    var bx = jx - nx * halfW;
+                    var by = jy - ny * halfW;
+
+                    foreach (var polygon in pillarPolygons)
+                    {
+                        if (SegmentIntersectsPolygon(ax, ay, bx, by, polygon))
+                        {
+                            if (sign < 0)
+                            {
+                                negHalf = Math.Max(4.0, negHalf - 4.0);
+                            }
+                            else
+                            {
+                                posHalf = Math.Max(4.0, posHalf - 4.0);
+                            }
+                            trimmed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!trimmed)
+                {
+                    return;
+                }
+            }
+        }
+
+        private static bool SegmentIntersectsPolygon(double ax, double ay, double bx, double by, double[][] polygon)
+        {
+            if (PointInPolygon(polygon, ax, ay) || PointInPolygon(polygon, bx, by))
+            {
+                return true;
+            }
+            for (var i = 0; i < polygon.Length; i++)
+            {
+                var j = (i + 1) % polygon.Length;
+                if (SegmentsIntersect(ax, ay, bx, by,
+                        polygon[i][0], polygon[i][1], polygon[j][0], polygon[j][1]))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool SegmentsIntersect(
+            double ax, double ay, double bx, double by,
+            double cx, double cy, double dx, double dy)
+        {
+            var d1 = Cross(cx, cy, dx, dy, ax, ay);
+            var d2 = Cross(cx, cy, dx, dy, bx, by);
+            var d3 = Cross(ax, ay, bx, by, cx, cy);
+            var d4 = Cross(ax, ay, bx, by, dx, dy);
+            return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+                   ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+        }
+
+        private static double Cross(double ax, double ay, double bx, double by, double px, double py)
+        {
+            return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+        }
+
+        /// <summary>
+        /// Seals the slots between a door/window box's jambs and the wall's cut
+        /// ends. The box is inset from the cut (see DoorInset), and without these
+        /// the inset band is open floor-to-ceiling space that hitscan and sight
+        /// pass straight through - a leak beside every window that bypasses the
+        /// sill. One one-sided blocking line along each wall face bridges jamb to
+        /// cut end, turning each slot into a sealed void pocket (the pillar-interior
+        /// idiom); from outside they render as seamless wall. Curved walls can
+        /// leave sub-unit residual gaps (chord vs arc) - cosmetic only.
+        /// </summary>
+        private void AddSlotSeals(double cx, double cy, double dx, double dy,
+            double nx, double ny, double halfW, double negHalf, double posHalf,
+            double fullHalf, string texture)
+        {
+            foreach (var side in new[] { 1.0, -1.0 })
+            {
+                foreach (var end in new[] { 1.0, -1.0 })
+                {
+                    var inner = end < 0 ? negHalf : posHalf;
+                    if (fullHalf - inner < 1.0)
+                    {
+                        continue;
+                    }
+
+                    var p1X = cx + end * dx * inner + side * nx * halfW;
+                    var p1Y = cy + end * dy * inner + side * ny * halfW;
+                    var p2X = cx + end * dx * fullHalf + side * nx * halfW;
+                    var p2Y = cy + end * dy * fullHalf + side * ny * halfW;
+
+                    // Front (right of v1->v2) must face outward, i.e. toward
+                    // side * n-hat: for side +1 the line must run against the wall
+                    // direction, for side -1 along it.
+                    var wantDx = side > 0 ? -dx : dx;
+                    var flip = (p2X - p1X) * wantDx + (p2Y - p1Y) * (side > 0 ? -dy : dy) < 0;
+                    var v1 = GetVertex((int)Math.Round(flip ? p2X : p1X), (int)Math.Round(flip ? p2Y : p1Y));
+                    var v2 = GetVertex((int)Math.Round(flip ? p1X : p2X), (int)Math.Round(flip ? p1Y : p2Y));
+                    if (v1 == v2)
+                    {
+                        continue;
+                    }
+
+                    map.Sidedefs.Add(new MapSidedef { Middle = texture, Sector = 0 });
+                    map.Linedefs.Add(new MapLinedef
+                    {
+                        V1 = v1,
+                        V2 = v2,
+                        Flags = DoomConst.LineFlagBlocking,
+                        Special = 0,
+                        Tag = 0,
+                        FrontSide = map.Sidedefs.Count - 1,
+                        BackSide = -1
+                    });
+                }
+            }
+        }
+
+        /// <summary>
+        /// Stands a window in a wall opening: a sector whose floor is the sill and
+        /// whose ceiling is the head, boxed by two-sided lines that all carry the
+        /// BLOCKING flag - the engine's flag semantics do the rest: players and
+        /// monsters can't pass a blocking two-sided line, but missiles are exempt
+        /// and hitscan/sight only care about geometry, so you can see and shoot
+        /// through the opening while the "glass" keeps everyone out. A window whose
+        /// opening degenerates at map scale becomes a solid filler block instead
+        /// (the wall was already cut, so SOMETHING must fill the hole).
+        /// </summary>
+        private bool AddWindowBox(WindowOpening window, double centerX, double centerY, double scale, int windowIndex)
+        {
+            var length = Math.Sqrt(window.DirX * window.DirX + window.DirY * window.DirY);
+            if (length < 1e-9)
+            {
+                return false;
+            }
+
+            var dx = window.DirX / length;
+            var dy = window.DirY / length;
+            var nx = -dy;
+            var ny = dx;
+
+            var cx = (window.CX - centerX) * scale;
+            var cy = (window.CY - centerY) * scale;
+            var halfW = Math.Max(window.ThicknessFt * scale / 2.0, 3.0);
+            var texture = WallTextures[windowIndex % WallTextures.Length];
+
+            var ceiling = map.Sectors[0].CeilingHeight;
+            var sill = Clamp((int)Math.Round(window.SillFt * scale), 0, ceiling - 16);
+            var head = Clamp((int)Math.Round(window.HeadFt * scale), sill + 16, ceiling);
+
+            // A window in a low (see-over) wall must not grow a bay taller than
+            // its wall: the bay stays open above the sill like the rest of the
+            // wall is open above its top - one sector can't express
+            // open/solid/open, and never-phantom-occlude is the faithful choice.
+            var wallTop = (int)Math.Round(window.HostHeightFt * scale);
+            var lowWall = window.HostHeightFt > 0.0
+                && wallTop < Math.Min(ceilingSourceUnits, ceiling) - FullHeightSlack;
+
+            var fullHalf = window.WidthFt * scale / 2.0;
+            var negHalf = Math.Min(Math.Max(4.0, fullHalf - DoorInset), fullHalf);
+            var posHalf = negHalf;
+            TrimEndsClearOfPillars(cx, cy, dx, dy, nx, ny, halfW, ref negHalf, ref posHalf);
+
+            var seeThrough = negHalf + posHalf >= 24.0 && head - sill >= 16 && sill < ceiling - 16;
+
+            var corners = new[]
+            {
+                new[] { cx - dx * negHalf + nx * halfW, cy - dy * negHalf + ny * halfW },
+                new[] { cx + dx * posHalf + nx * halfW, cy + dy * posHalf + ny * halfW },
+                new[] { cx + dx * posHalf - nx * halfW, cy + dy * posHalf - ny * halfW },
+                new[] { cx - dx * negHalf - nx * halfW, cy - dy * negHalf - ny * halfW },
+            };
+            if (SignedArea(corners) < 0)
+            {
+                Array.Reverse(corners);
+            }
+
+            if (!seeThrough)
+            {
+                // No meaningful opening at this scale: fill the gap so the wall
+                // reads continuous - matching the host's height, so a parapet's
+                // degenerate window doesn't become a full-height tower.
+                if (lowWall)
+                {
+                    AddRaisedBox(corners, Clamp(wallTop, 8, ceiling - FullHeightSlack), texture);
+                }
+                else
+                {
+                    AddLoop(corners, texture);
+                }
+                AddSlotSeals(cx, cy, dx, dy, nx, ny, halfW, negHalf, posHalf, fullHalf, texture);
+                pillarPolygons.Add(corners);
+                return false;
+            }
+
+            map.Sectors.Add(new MapSector
+            {
+                FloorHeight = sill,
+                CeilingHeight = lowWall ? ceiling : head,
+                FloorFlat = FloorFlat,
+                CeilingFlat = CeilingFlat,
+                LightLevel = 192,
+                Special = 0,
+                Tag = 0
+            });
+            var sector = map.Sectors.Count - 1;
+
+            var indices = new int[corners.Length];
+            for (var i = 0; i < corners.Length; i++)
+            {
+                var x = (int)Math.Round(corners[i][0]);
+                var y = (int)Math.Round(corners[i][1]);
+                indices[i] = GetVertex(x, y);
+
+                // Same bbox rule as the door boxes: a window can outlive its wall.
+                pillarMinX = Math.Min(pillarMinX, x);
+                pillarMinY = Math.Min(pillarMinY, y);
+                pillarMaxX = Math.Max(pillarMaxX, x);
+                pillarMaxY = Math.Max(pillarMaxY, y);
+            }
+
+            for (var i = 0; i < corners.Length; i++)
+            {
+                var next = (i + 1) % corners.Length;
+                if (indices[i] == indices[next])
+                {
+                    continue;
+                }
+
+                // Below-sill and above-head strips wear the wall texture; the slit
+                // between them stays open. Unpegged both ways so the strips align
+                // with the surrounding wall instead of the moving... nothing moves
+                // here, but floor-up/ceiling-down alignment matches the walls.
+                map.Sidedefs.Add(new MapSidedef { Upper = texture, Lower = texture, Sector = 0 });
+                var front = map.Sidedefs.Count - 1;
+                map.Sidedefs.Add(new MapSidedef { Upper = texture, Lower = texture, Sector = sector });
+                var back = map.Sidedefs.Count - 1;
+
+                map.Linedefs.Add(new MapLinedef
+                {
+                    V1 = indices[i],
+                    V2 = indices[next],
+                    Flags = DoomConst.LineFlagTwoSided | DoomConst.LineFlagBlocking
+                        | DoomConst.LineFlagUpperUnpegged | DoomConst.LineFlagLowerUnpegged,
+                    Special = 0,
+                    Tag = 0,
+                    FrontSide = front,
+                    BackSide = back
+                });
+            }
+
+            AddSlotSeals(cx, cy, dx, dy, nx, ny, halfW, negHalf, posHalf, fullHalf, texture);
+            pillarPolygons.Add(corners);
+            return true;
+        }
+
         /// <summary>
         /// Stands a working Doom door in a wall opening: a new sector whose ceiling
         /// starts at floor height (closed) and raises to the surrounding ceiling
@@ -727,20 +1016,28 @@ namespace DoomInDynamo.WadGen
             var cx = (door.CX - centerX) * scale;
             var cy = (door.CY - centerY) * scale;
 
-            var halfLen = door.WidthFt * scale / 2.0 - DoorInset;
             var halfW = Math.Max(door.ThicknessFt * scale / 2.0, 3.0);
-            if (halfLen < 12.0)
+            var fullHalf = door.WidthFt * scale / 2.0;
+            var negHalf = fullHalf - DoorInset;
+            var posHalf = negHalf;
+            if (negHalf < 12.0)
             {
                 // Too narrow to work as a door at this scale - leave the opening open.
                 return false;
             }
 
+            TrimEndsClearOfPillars(cx, cy, dx, dy, nx, ny, halfW, ref negHalf, ref posHalf);
+            if (negHalf + posHalf < 24.0)
+            {
+                return false; // a wall junction ate the doorway
+            }
+
             var corners = new[]
             {
-                new[] { cx - dx * halfLen + nx * halfW, cy - dy * halfLen + ny * halfW },
-                new[] { cx + dx * halfLen + nx * halfW, cy + dy * halfLen + ny * halfW },
-                new[] { cx + dx * halfLen - nx * halfW, cy + dy * halfLen - ny * halfW },
-                new[] { cx - dx * halfLen - nx * halfW, cy - dy * halfLen - ny * halfW },
+                new[] { cx - dx * negHalf + nx * halfW, cy - dy * negHalf + ny * halfW },
+                new[] { cx + dx * posHalf + nx * halfW, cy + dy * posHalf + ny * halfW },
+                new[] { cx + dx * posHalf - nx * halfW, cy + dy * posHalf - ny * halfW },
+                new[] { cx - dx * negHalf - nx * halfW, cy - dy * negHalf - ny * halfW },
             };
 
             // Same winding rule as the pillars: CCW puts each edge's front side on
@@ -813,9 +1110,11 @@ namespace DoomInDynamo.WadGen
                 });
             }
 
-            // Keep things (and the player start) out of the doorway - anything
-            // spawned inside a closed door sector is crushed into the zero-height
-            // gap and stuck.
+            // Seal the jamb slots so a CLOSED door can't be seen or shot past
+            // (same leak the windows had), then keep things (and the player start)
+            // out of the doorway - anything spawned inside a closed door sector is
+            // crushed into the zero-height gap and stuck.
+            AddSlotSeals(cx, cy, dx, dy, nx, ny, halfW, negHalf, posHalf, fullHalf, DoorTrackTexture);
             pillarPolygons.Add(corners);
             return true;
         }

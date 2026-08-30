@@ -27,6 +27,9 @@ namespace DoomInDynamo.Revit
         private const double FallbackThicknessFt = 0.5;
         private const double FallbackHeightFt = 10.0;
         private const double FallbackDoorWidthFt = 3.0;
+        private const double FallbackWindowWidthFt = 3.0;
+        private const double FallbackSillFt = 3.0;
+        private const double FallbackWindowHeightFt = 4.0;
 
         /// <summary>
         /// Reads walls, hosted doors, rooms, furniture, columns and stairs from the
@@ -62,17 +65,73 @@ namespace DoomInDynamo.Revit
 
             Dictionary<string, LevelBucket> buckets = BucketByBaseLevel(doc, allWalls);
 
+            string requested = (levelName ?? "").Trim();
+            var model = new WadGen.BuildingModel();
+            model.DocumentTitle = string.IsNullOrEmpty(doc.Title) ? "Untitled" : doc.Title;
+
+            // "*" (or "all") = the WHOLE model: Doom has no room-over-room, so the
+            // storeys can't stack - instead every level with walls is exported as
+            // its own cluster, laid out west-to-east with walkable gaps between
+            // them. One map, the entire building, exploded-axon style.
+            if (requested == "*" || string.Equals(requested, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                List<KeyValuePair<string, LevelBucket>> levels = buckets
+                    .Where(kvp => kvp.Key.Length > 0 && kvp.Value.Walls.Count > 0)
+                    .OrderBy(kvp => kvp.Value.Elevation)
+                    .ThenBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (levels.Count > 0)
+                {
+                    double offsetX = 0.0;
+                    var exported = new List<string>();
+                    foreach (KeyValuePair<string, LevelBucket> kvp in levels)
+                    {
+                        var pieces = new WadGen.BuildingModel();
+                        ExtractLevel(doc, kvp.Key, kvp.Value, pieces);
+                        if (pieces.Walls.Count == 0)
+                        {
+                            continue;
+                        }
+
+                        double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue;
+                        foreach (WadGen.WallSegment wallSeg in pieces.Walls)
+                        {
+                            minX = Math.Min(minX, Math.Min(wallSeg.X1, wallSeg.X2));
+                            minY = Math.Min(minY, Math.Min(wallSeg.Y1, wallSeg.Y2));
+                            maxX = Math.Max(maxX, Math.Max(wallSeg.X1, wallSeg.X2));
+                        }
+
+                        OffsetModel(pieces, offsetX - minX, -minY);
+                        MergeInto(model, pieces);
+                        exported.Add(kvp.Key);
+                        offsetX += (maxX - minX) + ClusterGapFt;
+                    }
+
+                    if (model.Walls.Count == 0)
+                    {
+                        throw new InvalidOperationException("No walls found on any level - nothing to convert.");
+                    }
+
+                    model.LevelName = "whole model: " + string.Join(" | ", exported);
+                    return model;
+                }
+
+                // No named levels at all - degrade to the single-level auto-pick.
+                requested = "";
+            }
+
             string chosenName;
             List<Wall> keptWalls;
-            SelectLevel(buckets, (levelName ?? "").Trim(), out chosenName, out keptWalls);
+            SelectLevel(buckets, requested, out chosenName, out keptWalls);
 
-            Dictionary<long, List<FamilyInstance>> doorsByHost = CollectDoorsByHostWall(doc, chosenName);
-
-            var model = new WadGen.BuildingModel();
-            foreach (Wall wall in keptWalls)
+            LevelBucket chosenBucket;
+            if (!buckets.TryGetValue(chosenName, out chosenBucket))
             {
-                ExtractWall(wall, doorsByHost, model.Walls, model.Doors);
+                chosenBucket = new LevelBucket();
             }
+
+            ExtractLevel(doc, chosenName, chosenBucket, model);
 
             if (model.Walls.Count == 0)
             {
@@ -80,22 +139,75 @@ namespace DoomInDynamo.Revit
                     "No walls found on level '" + chosenName + "' - nothing to convert.");
             }
 
-            model.Rooms = CollectRoomPoints(doc);
+            model.LevelName = chosenName;
+            return model;
+        }
 
-            // The chosen level's elevation (when any wall resolved one) lets the
-            // prism collector tell floor-standing furniture from wall-hung pieces.
-            double levelElevationFt = double.PositiveInfinity;
-            LevelBucket chosenBucket;
-            if (buckets.TryGetValue(chosenName, out chosenBucket))
+        /// <summary>How far apart whole-model clusters sit - generous enough to
+        /// walk between storeys but not a hike (30 ft = 480 map units).</summary>
+        private const double ClusterGapFt = 30.0;
+
+        /// <summary>Extracts one level's walls (with door/window cuts), doors,
+        /// windows, rooms, furnishings and stairs into the given model, in world
+        /// coordinates - the caller offsets and merges for whole-model exports.</summary>
+        private static void ExtractLevel(Document doc, string levelName, LevelBucket bucket, WadGen.BuildingModel model)
+        {
+            // The level's elevation (when any wall resolved one) anchors two things:
+            // telling floor-standing furniture from wall-hung pieces, and placing
+            // level-less curtain-wall door panels on the right storey.
+            double levelElevationFt = bucket.Elevation;
+
+            Dictionary<long, List<FamilyInstance>> doorsByHost = CollectDoorsByHostWall(doc, levelName, levelElevationFt);
+            Dictionary<long, List<FamilyInstance>> windowsByHost = CollectWindowsByHostWall(doc, levelName, levelElevationFt);
+
+            foreach (Wall wall in bucket.Walls)
             {
-                levelElevationFt = chosenBucket.Elevation;
+                ExtractWall(wall, doorsByHost, windowsByHost, levelElevationFt, model.Walls, model.Doors, model.Windows);
             }
 
-            CollectPrisms(doc, chosenName, levelElevationFt, model.Prisms);
-            CollectStairs(doc, chosenName, model.Stairs);
-            model.LevelName = chosenName;
-            model.DocumentTitle = string.IsNullOrEmpty(doc.Title) ? "Untitled" : doc.Title;
-            return model;
+            CollectRoomPoints(doc, levelName, model.Rooms);
+            CollectPrisms(doc, levelName, levelElevationFt, model.Prisms);
+            CollectStairs(doc, levelName, model.Stairs);
+        }
+
+        private static void OffsetModel(WadGen.BuildingModel model, double dx, double dy)
+        {
+            foreach (WadGen.WallSegment wall in model.Walls)
+            {
+                wall.X1 += dx; wall.Y1 += dy;
+                wall.X2 += dx; wall.Y2 += dy;
+            }
+            foreach (WadGen.DoorOpening door in model.Doors)
+            {
+                door.CX += dx; door.CY += dy;
+            }
+            foreach (WadGen.WindowOpening window in model.Windows)
+            {
+                window.CX += dx; window.CY += dy;
+            }
+            foreach (WadGen.Prism prism in model.Prisms)
+            {
+                prism.CX += dx; prism.CY += dy;
+            }
+            foreach (WadGen.StairFlight stair in model.Stairs)
+            {
+                stair.X1 += dx; stair.Y1 += dy;
+                stair.X2 += dx; stair.Y2 += dy;
+            }
+            foreach (WadGen.RoomPoint room in model.Rooms)
+            {
+                room.X += dx; room.Y += dy;
+            }
+        }
+
+        private static void MergeInto(WadGen.BuildingModel target, WadGen.BuildingModel pieces)
+        {
+            target.Walls.AddRange(pieces.Walls);
+            target.Doors.AddRange(pieces.Doors);
+            target.Windows.AddRange(pieces.Windows);
+            target.Prisms.AddRange(pieces.Prisms);
+            target.Stairs.AddRange(pieces.Stairs);
+            target.Rooms.AddRange(pieces.Rooms);
         }
 
         /// <summary>Walls grouped under one base-level name. Elevation is the lowest
@@ -214,7 +326,8 @@ namespace DoomInDynamo.Revit
             }
         }
 
-        private static Dictionary<long, List<FamilyInstance>> CollectDoorsByHostWall(Document doc, string chosenLevelName)
+        private static Dictionary<long, List<FamilyInstance>> CollectDoorsByHostWall(
+            Document doc, string chosenLevelName, double levelElevationFt)
         {
             // ElementId.Value (long) as the key - IntegerValue is deprecated in
             // current Revit versions.
@@ -233,12 +346,12 @@ namespace DoomInDynamo.Revit
 
                 // A multi-storey wall based on the exported level can host doors on
                 // OTHER storeys too; cutting those would punch walkable holes where
-                // this storey is solid. Only doors on the exported level cut gaps
-                // (a door with an unresolvable level only matches the "" bucket,
-                // same rule the walls follow).
-                Level doorLevel = doc.GetElement(door.LevelId) as Level;
-                string doorLevelName = doorLevel != null ? (doorLevel.Name ?? "") : "";
-                if (!string.Equals(doorLevelName, chosenLevelName, StringComparison.OrdinalIgnoreCase))
+                // this storey is solid - so only doors on the exported level cut
+                // gaps. Wrinkle: CURTAIN WALL doors are panels, and panels usually
+                // resolve no level at all (no LevelId, no level parameters), so a
+                // level-less door is judged by elevation instead: its base has to
+                // sit at this storey's floor.
+                if (!OpeningBelongsToLevel(doc, door, chosenLevelName, levelElevationFt))
                 {
                     continue;
                 }
@@ -255,8 +368,70 @@ namespace DoomInDynamo.Revit
             return doorsByHost;
         }
 
+        /// <summary>Level test shared by hosted doors and windows: a resolvable
+        /// level must match the exported one by name; a level-less opening (curtain
+        /// wall door/window panels are the usual case) is accepted when its base
+        /// elevation sits at this storey's floor - or unconditionally when either
+        /// the "" bucket is being exported or no elevation is known to test against.</summary>
+        private static bool OpeningBelongsToLevel(Document doc, FamilyInstance opening,
+            string chosenLevelName, double levelElevationFt)
+        {
+            string openingLevelName = ResolveInstanceLevelName(doc, opening);
+            if (openingLevelName.Length > 0)
+            {
+                return string.Equals(openingLevelName, chosenLevelName, StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (chosenLevelName.Length == 0 || double.IsPositiveInfinity(levelElevationFt))
+            {
+                return true;
+            }
+
+            BoundingBoxXYZ box = opening.get_BoundingBox(null);
+            return box != null
+                && box.Min.Z > levelElevationFt - 3.0
+                && box.Min.Z < levelElevationFt + 6.0;
+        }
+
+        /// <summary>Same bucketing as the doors - hosted windows on the exported
+        /// level, keyed by host wall id - so ExtractWall can cut their openings.</summary>
+        private static Dictionary<long, List<FamilyInstance>> CollectWindowsByHostWall(
+            Document doc, string chosenLevelName, double levelElevationFt)
+        {
+            var windowsByHost = new Dictionary<long, List<FamilyInstance>>();
+            IList<Element> windows = new FilteredElementCollector(doc)
+                .OfCategory(BuiltInCategory.OST_Windows)
+                .WhereElementIsNotElementType()
+                .ToElements();
+            foreach (Element element in windows)
+            {
+                FamilyInstance window = element as FamilyInstance;
+                if (window == null || window.Host == null || !IsMainModelOrPrimary(window))
+                {
+                    continue;
+                }
+
+                if (!OpeningBelongsToLevel(doc, window, chosenLevelName, levelElevationFt))
+                {
+                    continue;
+                }
+
+                long hostId = window.Host.Id.Value;
+                List<FamilyInstance> list;
+                if (!windowsByHost.TryGetValue(hostId, out list))
+                {
+                    list = new List<FamilyInstance>();
+                    windowsByHost[hostId] = list;
+                }
+                list.Add(window);
+            }
+            return windowsByHost;
+        }
+
         private static void ExtractWall(Wall wall, Dictionary<long, List<FamilyInstance>> doorsByHost,
-            List<WadGen.WallSegment> output, List<WadGen.DoorOpening> doorOutput)
+            Dictionary<long, List<FamilyInstance>> windowsByHost, double levelElevationFt,
+            List<WadGen.WallSegment> output, List<WadGen.DoorOpening> doorOutput,
+            List<WadGen.WindowOpening> windowOutput)
         {
             Curve curve = ((LocationCurve)wall.Location).Curve;
             if (curve == null)
@@ -345,11 +520,7 @@ namespace DoomInDynamo.Revit
             {
                 foreach (FamilyInstance door in hostedDoors)
                 {
-                    // Doors are point-hosted families; one without a LocationPoint
-                    // (or with the point unset) can't be placed on the centerline,
-                    // so it simply doesn't get an opening.
-                    LocationPoint location = door.Location as LocationPoint;
-                    XYZ doorPoint = location != null ? location.Point : null;
+                    XYZ doorPoint = OpeningPoint(door);
                     if (doorPoint == null)
                     {
                         continue;
@@ -363,7 +534,24 @@ namespace DoomInDynamo.Revit
 
             List<(double Start, double End)> merged = MergeCuts(cuts, totalLength);
 
-            foreach ((double Start, double End) keep in KeepIntervals(merged, totalLength))
+            // Windows cut the wall the same way, but a doorway takes precedence
+            // when a window overlaps one (a curtain-wall door often carries glazing
+            // right up against it - the walkable opening wins). Curtain walls also
+            // contribute their glazed panels as synthesized window cuts, so
+            // storefronts read as glass instead of solid wall.
+            List<(double Start, double End, double Sill, double Head)> panelCuts =
+                CollectCurtainPanelCuts(wall, pts, stations, levelElevationFt, wallBox);
+            List<(double Start, double End, double Sill, double Head)> windowCuts =
+                CollectWindowCuts(wall, windowsByHost, pts, stations, totalLength, merged, panelCuts);
+
+            var allCuts = new List<(double Start, double End)>(merged);
+            foreach ((double Start, double End, double Sill, double Head) cut in windowCuts)
+            {
+                allCuts.Add((cut.Start, cut.End));
+            }
+            allCuts.Sort((a, b) => a.Start.CompareTo(b.Start));
+
+            foreach ((double Start, double End) keep in KeepIntervals(allCuts, totalLength))
             {
                 EmitRun(pts, stations, keep.Start, keep.End, thicknessFt, heightFt, output);
             }
@@ -391,6 +579,277 @@ namespace DoomInDynamo.Revit
                     ThicknessFt = thicknessFt,
                 });
             }
+
+            foreach ((double Start, double End, double Sill, double Head) cut in windowCuts)
+            {
+                double centerStation = (cut.Start + cut.End) / 2.0;
+                (double X, double Y) center = PointAtStation(pts, stations, centerStation);
+                (double X, double Y) dir = DirectionAtStation(pts, stations, centerStation);
+                if (dir.X == 0.0 && dir.Y == 0.0)
+                {
+                    continue;
+                }
+
+                windowOutput.Add(new WadGen.WindowOpening
+                {
+                    CX = center.X,
+                    CY = center.Y,
+                    DirX = dir.X,
+                    DirY = dir.Y,
+                    WidthFt = cut.End - cut.Start,
+                    ThicknessFt = thicknessFt,
+                    SillFt = cut.Sill,
+                    HeadFt = cut.Head,
+                    HostHeightFt = heightFt,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Hosted windows as merged cut intervals with their sill/head heights
+        /// (heights relative to the wall's level, which is what the map's floor 0
+        /// means). Windows overlapping a doorway are dropped; overlapping windows
+        /// (ribbon glazing modeled as separate units) merge into one opening
+        /// spanning the lowest sill to the highest head.
+        /// </summary>
+        private static List<(double Start, double End, double Sill, double Head)> CollectWindowCuts(
+            Wall wall, Dictionary<long, List<FamilyInstance>> windowsByHost,
+            List<(double X, double Y)> pts, double[] stations, double totalLength,
+            List<(double Start, double End)> doorCuts,
+            List<(double Start, double End, double Sill, double Head)> extraCuts)
+        {
+            var result = new List<(double Start, double End, double Sill, double Head)>();
+
+            var raw = new List<(double Start, double End, double Sill, double Head)>();
+            List<FamilyInstance> hostedWindows;
+            if (windowsByHost.TryGetValue(wall.Id.Value, out hostedWindows))
+            {
+                foreach (FamilyInstance window in hostedWindows)
+                {
+                    XYZ point = OpeningPoint(window);
+                    if (point == null)
+                    {
+                        continue;
+                    }
+
+                    double station = StationOfClosestPoint(pts, stations, point.X, point.Y);
+                    double halfGap = (GetWindowWidthFt(window) + DoorGapExtraFt) / 2.0;
+                    double sill = GetWindowSillFt(window);
+                    raw.Add((station - halfGap, station + halfGap, sill, GetWindowHeadFt(window, sill)));
+                }
+            }
+            raw.AddRange(extraCuts);
+
+            // Clamp to the wall, drop anything under a doorway (curtain glazing
+            // included - the walkable opening wins), sort, then merge.
+            var filtered = new List<(double Start, double End, double Sill, double Head)>();
+            foreach ((double Start, double End, double Sill, double Head) cut in raw)
+            {
+                double start = Math.Max(0.0, cut.Start);
+                double end = Math.Min(totalLength, cut.End);
+                if (end <= start)
+                {
+                    continue;
+                }
+
+                var overlapsDoor = false;
+                foreach ((double Start, double End) door in doorCuts)
+                {
+                    if (start < door.End && end > door.Start)
+                    {
+                        overlapsDoor = true;
+                        break;
+                    }
+                }
+                if (!overlapsDoor)
+                {
+                    filtered.Add((start, end, cut.Sill, cut.Head));
+                }
+            }
+
+            filtered.Sort((a, b) => a.Start.CompareTo(b.Start));
+            foreach ((double Start, double End, double Sill, double Head) cut in filtered)
+            {
+                if (result.Count > 0 && cut.Start <= result[result.Count - 1].End)
+                {
+                    (double Start, double End, double Sill, double Head) last = result[result.Count - 1];
+                    if (cut.Sill <= last.Head && cut.Head >= last.Sill)
+                    {
+                        // Vertically overlapping (ribbon glazing modeled as units):
+                        // union into one band.
+                        result[result.Count - 1] = (
+                            last.Start,
+                            Math.Max(last.End, cut.End),
+                            Math.Min(last.Sill, cut.Sill),
+                            Math.Max(last.Head, cut.Head));
+                    }
+                    else
+                    {
+                        // Vertically DISJOINT (a clerestory above a normal window):
+                        // unioning would make the solid spandrel between them
+                        // transparent. One sector can't show both bands, so keep
+                        // the taller one - the lesser opening is the sacrifice.
+                        var cutTaller = cut.Head - cut.Sill > last.Head - last.Sill;
+                        result[result.Count - 1] = (
+                            last.Start,
+                            Math.Max(last.End, cut.End),
+                            cutTaller ? cut.Sill : last.Sill,
+                            cutTaller ? cut.Head : last.Head);
+                    }
+                }
+                else
+                {
+                    result.Add(cut);
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// A curtain wall's glazed panels, synthesized into window cuts so
+        /// storefronts export as see-through glass rather than solid wall. Panels
+        /// that are really doors or windows are skipped (the hosted collectors
+        /// already handle them); spandrel/solid panels are NOT distinguishable
+        /// reliably, so all remaining panels count as glass - an approximation.
+        /// Sill/head are measured from the level (or the wall's own base when no
+        /// level elevation is known); panels starting more than a storey up (a
+        /// multi-storey curtain wall's upper bands) are skipped.
+        /// </summary>
+        private static List<(double Start, double End, double Sill, double Head)> CollectCurtainPanelCuts(
+            Wall wall, List<(double X, double Y)> pts, double[] stations,
+            double levelElevationFt, BoundingBoxXYZ wallBox)
+        {
+            var cuts = new List<(double Start, double End, double Sill, double Head)>();
+            try
+            {
+                CurtainGrid grid = wall.CurtainGrid;
+                if (grid == null)
+                {
+                    return cuts;
+                }
+
+                double datum = double.IsPositiveInfinity(levelElevationFt)
+                    ? (wallBox != null ? wallBox.Min.Z : 0.0)
+                    : levelElevationFt;
+
+                foreach (ElementId panelId in grid.GetPanelIds())
+                {
+                    Element panel = wall.Document.GetElement(panelId);
+                    if (panel == null || !IsMainModelOrPrimary(panel))
+                    {
+                        continue;
+                    }
+
+                    Category category = panel.Category;
+                    if (category != null)
+                    {
+                        long categoryId = category.Id.Value;
+                        if (categoryId == (long)BuiltInCategory.OST_Doors ||
+                            categoryId == (long)BuiltInCategory.OST_Windows)
+                        {
+                            continue; // handled by the hosted door/window paths
+                        }
+                    }
+
+                    BoundingBoxXYZ box = panel.get_BoundingBox(null);
+                    if (box == null)
+                    {
+                        continue;
+                    }
+
+                    double sill = box.Min.Z - datum;
+                    double head = box.Max.Z - datum;
+                    if (head - sill < 0.5 || sill > 12.0)
+                    {
+                        continue;
+                    }
+                    if (sill < 0.0)
+                    {
+                        sill = 0.0;
+                    }
+
+                    double station = StationOfClosestPoint(pts, stations,
+                        (box.Min.X + box.Max.X) / 2.0, (box.Min.Y + box.Max.Y) / 2.0);
+                    double width = PositiveDoubleOrZero(panel.get_Parameter(BuiltInParameter.CURTAIN_WALL_PANELS_WIDTH));
+                    if (width <= 0.0)
+                    {
+                        width = Math.Max(box.Max.X - box.Min.X, box.Max.Y - box.Min.Y);
+                    }
+                    if (width < 0.5)
+                    {
+                        continue;
+                    }
+
+                    // No extra margin: panels tile edge to edge, and the merge
+                    // welds adjacent glass into one ribbon opening.
+                    cuts.Add((station - width / 2.0, station + width / 2.0, sill, head));
+                }
+            }
+            catch
+            {
+                cuts.Clear();
+            }
+            return cuts;
+        }
+
+        private static double GetWindowWidthFt(FamilyInstance window)
+        {
+            FamilySymbol symbol = window.Symbol;
+            double width = PositiveDoubleOrZero(symbol != null
+                ? symbol.get_Parameter(BuiltInParameter.WINDOW_WIDTH) : null);
+            if (width <= 0.0)
+            {
+                width = PositiveDoubleOrZero(window.get_Parameter(BuiltInParameter.WINDOW_WIDTH));
+            }
+            if (width <= 0.0)
+            {
+                width = PositiveDoubleOrZero(symbol != null
+                    ? symbol.get_Parameter(BuiltInParameter.FAMILY_WIDTH_PARAM) : null);
+            }
+            if (width <= 0.0)
+            {
+                width = PositiveDoubleOrZero(window.get_Parameter(BuiltInParameter.CURTAIN_WALL_PANELS_WIDTH));
+            }
+            if (width <= 0.0)
+            {
+                width = BoxPlanWidthFt(window, 1.0, 10.0);
+            }
+            return width > 0.0 ? width : FallbackWindowWidthFt;
+        }
+
+        private static double GetWindowSillFt(FamilyInstance window)
+        {
+            // "Sill Height" is an instance parameter measured from the level - the
+            // same datum the exported map's floor 0 uses. Zero is a legitimate
+            // value (floor-to-ceiling glazing), so only an ABSENT parameter falls
+            // back - don't confuse "0" with "not set" like the width helpers may.
+            Parameter parameter = window.get_Parameter(BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM);
+            if (parameter != null && parameter.HasValue)
+            {
+                return Math.Max(0.0, parameter.AsDouble());
+            }
+            return FallbackSillFt;
+        }
+
+        private static double GetWindowHeadFt(FamilyInstance window, double sillFt)
+        {
+            // "Head Height" when present; otherwise sill + the family's height.
+            double head = PositiveDoubleOrZero(window.get_Parameter(BuiltInParameter.INSTANCE_HEAD_HEIGHT_PARAM));
+            if (head > sillFt)
+            {
+                return head;
+            }
+
+            FamilySymbol symbol = window.Symbol;
+            double height = PositiveDoubleOrZero(symbol != null
+                ? symbol.get_Parameter(BuiltInParameter.WINDOW_HEIGHT) : null);
+            if (height <= 0.0)
+            {
+                height = PositiveDoubleOrZero(symbol != null
+                    ? symbol.get_Parameter(BuiltInParameter.FAMILY_HEIGHT_PARAM) : null);
+            }
+            return sillFt + (height > 0.0 ? height : FallbackWindowHeightFt);
         }
 
         /// <summary>Unit direction of the polyline segment containing the station
@@ -415,6 +874,36 @@ namespace DoomInDynamo.Revit
             return length > 1e-9 ? (dx / length, dy / length) : (0.0, 0.0);
         }
 
+        /// <summary>Where a hosted opening sits in plan. Regular doors/windows are
+        /// point-hosted; CURTAIN WALL doors/windows are panels with no
+        /// LocationPoint at all, so their bounding-box center stands in - it lies
+        /// on the panel, which lies on the wall, which is all the centerline
+        /// projection needs.</summary>
+        private static XYZ OpeningPoint(FamilyInstance opening)
+        {
+            LocationPoint location = opening.Location as LocationPoint;
+            if (location != null && location.Point != null)
+            {
+                return location.Point;
+            }
+
+            BoundingBoxXYZ box = opening.get_BoundingBox(null);
+            return box != null ? (box.Min + box.Max) / 2.0 : null;
+        }
+
+        /// <summary>Plan footprint's longer side from the bounding box - the last
+        /// resort for panel widths when no width parameter answers.</summary>
+        private static double BoxPlanWidthFt(FamilyInstance opening, double minFt, double maxFt)
+        {
+            BoundingBoxXYZ box = opening.get_BoundingBox(null);
+            if (box == null)
+            {
+                return 0.0;
+            }
+            double extent = Math.Max(box.Max.X - box.Min.X, box.Max.Y - box.Min.Y);
+            return extent < minFt ? 0.0 : Math.Min(extent, maxFt);
+        }
+
         private static double GetDoorWidthFt(FamilyInstance door)
         {
             // Width lives on the type for standard door families, but some families
@@ -431,6 +920,16 @@ namespace DoomInDynamo.Revit
             {
                 width = PositiveDoubleOrZero(symbol != null
                     ? symbol.get_Parameter(BuiltInParameter.FAMILY_WIDTH_PARAM) : null);
+            }
+            if (width <= 0.0)
+            {
+                // Curtain wall doors are panels whose size the grid drives - their
+                // width lives on the panel, not in any door parameter.
+                width = PositiveDoubleOrZero(door.get_Parameter(BuiltInParameter.CURTAIN_WALL_PANELS_WIDTH));
+            }
+            if (width <= 0.0)
+            {
+                width = BoxPlanWidthFt(door, 1.5, 10.0);
             }
             return width > 0.0 ? width : FallbackDoorWidthFt;
         }
@@ -652,11 +1151,12 @@ namespace DoomInDynamo.Revit
             return option == null || option.IsPrimary;
         }
 
-        private static List<WadGen.RoomPoint> CollectRoomPoints(Document doc)
+        private static void CollectRoomPoints(Document doc, string chosenLevelName, List<WadGen.RoomPoint> output)
         {
             // Rooms are only placement hints, so any failure here (rooms are a
             // frequent source of API surprises in linked/partially-loaded models)
-            // just means the WAD gets its things placed without them.
+            // just means the WAD gets its things placed without them. Level-matched
+            // so whole-model exports drop each level's hints into its own cluster.
             var rooms = new List<WadGen.RoomPoint>();
             try
             {
@@ -672,6 +1172,11 @@ namespace DoomInDynamo.Revit
                     {
                         continue; // unplaced/unbounded rooms have no meaningful point
                     }
+                    if (!string.Equals(LevelNameFromId(doc, room.LevelId), chosenLevelName,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
                     LocationPoint location = room.Location as LocationPoint;
                     XYZ point = location != null ? location.Point : null;
                     if (point == null)
@@ -685,7 +1190,7 @@ namespace DoomInDynamo.Revit
             {
                 rooms.Clear();
             }
-            return rooms;
+            output.AddRange(rooms);
         }
 
         /// <summary>

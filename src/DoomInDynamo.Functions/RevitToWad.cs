@@ -26,7 +26,7 @@ namespace DoomInDynamo
         /// <param name="seed">Random seed for item placement - change it to reshuffle the pickups and monsters.</param>
         /// <param name="itemCount">How many items/monsters to scatter (0-500).</param>
         /// <param name="includeMonsters">False = peaceful architecture walkthrough, true = it's Doom.</param>
-        /// <param name="levelName">Revit level to export. Empty = the level with the most walls.</param>
+        /// <param name="levelName">Revit level to export. Empty = the level with the most walls; "*" = the WHOLE model, every level laid out side by side with walkable gaps between the storeys.</param>
         /// <returns>wadPath: the written file (empty on failure); report: what happened.</returns>
         [MultiReturn(new[] { "wadPath", "report" })]
         public static Dictionary<string, object> Export(

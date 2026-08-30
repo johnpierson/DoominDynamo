@@ -84,8 +84,10 @@ namespace WadSmokeTest
             // South wall with a 3.5 ft door gap centered at x=10.
             AddWall(model, 0, 0, 8.25, 0, t, h);
             AddWall(model, 11.75, 0, 40, 0, t, h);
-            // North, west, east walls.
-            AddWall(model, 0, 30, 40, 30, t, h);
+            // North wall with a 4 ft window gap centered at x=30 (gap = width+0.5,
+            // like the extractor cuts), then west and east walls.
+            AddWall(model, 0, 30, 27.75, 30, t, h);
+            AddWall(model, 32.25, 30, 40, 30, t, h);
             AddWall(model, 0, 0, 0, 30, t, h);
             AddWall(model, 40, 0, 40, 30, t, h);
             // Interior partition at x=22 with a doorway from y=12..16.
@@ -102,6 +104,14 @@ namespace WadSmokeTest
             // merged door cut).
             model.Doors.Add(new DoorOpening { CX = 10, CY = 0, DirX = 1, DirY = 0, WidthFt = 3.5, ThicknessFt = t });
             model.Doors.Add(new DoorOpening { CX = 22, CY = 14, DirX = 0, DirY = 1, WidthFt = 4.0, ThicknessFt = t });
+
+            // A window in the north wall gap: sill 3 ft, head 7 ft, in a
+            // full-height (9 ft) wall.
+            model.Windows.Add(new WindowOpening
+            {
+                CX = 30, CY = 30, DirX = 1, DirY = 0,
+                WidthFt = 4.5, ThicknessFt = t, SillFt = 3.0, HeadFt = 7.0, HostHeightFt = h
+            });
 
             // Furnishings: a desk (raised block) and a full-height column (solid).
             model.Prisms.Add(new Prism { CX = 30, CY = 19, DirX = 1, DirY = 0, HalfLenFt = 2.5, HalfWidthFt = 1.25, HeightFt = 2.5 });
@@ -258,10 +268,10 @@ namespace WadSmokeTest
 
         private static void ValidateSlot(ParsedMap map, string slot, List<Tuple<string, byte[]>> lumps, int slotStart)
         {
-            // One big sector + 2 doors + 1 low wall + 1 desk + 11 stair steps (the
-            // 12 ft flight loses 8 units to the end insets -> 11 treads; the column
-            // is full-height solid, so no sector of its own).
-            Check(map.SectorCount == 16, slot + ": expected sector inventory (got " + map.SectorCount + ")");
+            // One big sector + 2 doors + 1 window + 1 low wall + 1 desk + 11 stair
+            // steps (the 12 ft flight loses 8 units to the end insets -> 11 treads;
+            // the column is full-height solid, so no sector of its own).
+            Check(map.SectorCount == 17, slot + ": expected sector inventory (got " + map.SectorCount + ")");
             Check(map.Vertices.Length > 0 && map.Linedefs.Length >= 8, slot + ": has geometry");
             Check(map.Segs.Length > 0 && map.Subsectors.Length > 0 && map.Nodes.Length > 0, slot + ": has BSP");
 
@@ -304,6 +314,24 @@ namespace WadSmokeTest
             Check(drFaces == 4, slot + ": four DR door faces (two per door)");
             Check(exits == 4, slot + ": exit pedestal has four usable faces");
             Check(ok, slot + ": door faces are two-sided with a back sector");
+
+            // The window box: two-sided AND explicitly blocking (players/monsters
+            // can't pass, but sight, hitscan and missiles go through the opening).
+            var windowLines = 0;
+            foreach (var line in map.Linedefs)
+            {
+                if ((line[2] & 0x0005) == 0x0005 && line[6] != -1)
+                {
+                    windowLines++;
+                }
+            }
+            Check(windowLines == 4, slot + ": four blocking see-through window lines");
+
+            // Jamb slot seals: each door/window box insets 4 units from its cut
+            // ends, and one-sided blocking lines must seal the resulting slots on
+            // both wall faces or hitscan/sight leak past the sill (2 doors + 1
+            // window = 12 seals on top of the previous 102 lines).
+            Check(map.Linedefs.Length == 114, slot + ": jamb seals emitted (" + map.Linedefs.Length + " linedefs)");
 
             ok = true;
             foreach (var seg in map.Segs)
@@ -621,6 +649,13 @@ namespace WadSmokeTest
                     okHeights &= FloorAt(world, sx, 160) == 8 * step;
                 }
                 Check(okHeights, "low wall, desk and all 11 stair treads have the expected floor heights");
+
+                // The window at (30, 30)ft -> map (160, 240): its sector spans sill
+                // 48 to head 112 - the see-through slit in the north wall.
+                var windowSubsector = Geometry.PointInSubsector(Fixed.FromDouble(160), Fixed.FromDouble(240), world.Map);
+                Check(windowSubsector.Sector.FloorHeight.Data >> 16 == 48 &&
+                      windowSubsector.Sector.CeilingHeight.Data >> 16 == 112,
+                    "window sector spans sill 48 to head 112");
 
                 // Cross-check PointInSubsector against the same random points the
                 // structural walk used - it must resolve without throwing to a real

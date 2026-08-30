@@ -43,6 +43,28 @@ namespace DoomInDynamo.WadGen
     }
 
     /// <summary>
+    /// One window opening cut out of a wall: like a <see cref="DoorOpening"/> plus
+    /// the sill and head heights. WadGen turns it into a see-through (and
+    /// shoot-through, but not walk-through) opening between those heights.
+    /// Feet / unit vectors.
+    /// </summary>
+    internal sealed class WindowOpening
+    {
+        public double CX;
+        public double CY;
+        public double DirX;
+        public double DirY;
+        public double WidthFt;
+        public double ThicknessFt;
+        public double SillFt;
+        public double HeadFt;
+
+        /// <summary>Height of the wall the window sits in - a window in a low
+        /// (see-over) wall must not grow a full-height bay above its head.</summary>
+        public double HostHeightFt;
+    }
+
+    /// <summary>
     /// A box-shaped obstacle standing on the floor - furniture, casework, a column.
     /// WadGen turns it into either a solid pillar (tall enough to reach headroom)
     /// or a raised-floor block the player can see and shoot over. Plan rectangle
@@ -84,6 +106,7 @@ namespace DoomInDynamo.WadGen
         public List<WallSegment> Walls = new List<WallSegment>();
         public List<RoomPoint> Rooms = new List<RoomPoint>();
         public List<DoorOpening> Doors = new List<DoorOpening>();
+        public List<WindowOpening> Windows = new List<WindowOpening>();
         public List<Prism> Prisms = new List<Prism>();
         public List<StairFlight> Stairs = new List<StairFlight>();
         public string LevelName = "";
